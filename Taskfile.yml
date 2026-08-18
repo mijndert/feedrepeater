@@ -1,0 +1,235 @@
+version: "3"
+
+# .env is loaded here for tasks that run after it exists. Tasks that may run on
+# a fresh checkout source it themselves as well, because this block is
+# evaluated when Taskfile.yml is parsed — before `setup` has a chance to write
+# the file.
+dotenv: [".env"]
+
+vars:
+  BIN: bin/feedrepeater
+  # Sourced by every task that needs the environment, whether or not the
+  # dotenv block above found a file.
+  ENV: 'if [ -f .env ]; then set -a; . ./.env; set +a; fi'
+  DB: '{{.FR_DB_PATH | default "dev.db"}}'
+
+tasks:
+  default:
+    desc: List available tasks
+    silent: true
+    cmds:
+      - task --list
+
+  setup:
+    desc: Create .env with a freshly generated secret key
+    status:
+      - test -f .env
+    cmds:
+      - go build -o {{.BIN}} ./cmd/feedrepeater
+      - |
+        cat > .env <<EOF
+        # Local development. Never reuse this key in production.
+        FR_SECRET_KEY=$({{.BIN}} genkey)
+        FR_BASE_URL=http://localhost:8080
+        FR_ADDR=127.0.0.1:8080
+        FR_DB_PATH=dev.db
+        # Poll faster than the 15m production default while developing.
+        FR_MIN_POLL_INTERVAL=1m
+        EOF
+      - echo "wrote .env"
+
+  dev:
+    desc: Run the server locally (http://localhost:8080)
+    deps: [setup]
+    cmds:
+      - |
+        {{.ENV}}
+        go run ./cmd/feedrepeater
+
+  dev:insecure:
+    desc: Run with the SSRF guard off, so feeds on localhost work
+    deps: [setup]
+    cmds:
+      - |
+        {{.ENV}}
+        export FR_ALLOW_PRIVATE_NETWORKS=1
+        go run ./cmd/feedrepeater
+
+  build:
+    desc: Build the binary into bin/
+    sources: ["**/*.go", "go.sum", "internal/web/templates/*", "internal/web/static/*"]
+    generates: ["{{.BIN}}"]
+    cmds:
+      - CGO_ENABLED=0 go build -trimpath -o {{.BIN}} ./cmd/feedrepeater
+
+  key:
+    desc: Print a new FR_SECRET_KEY
+    cmds:
+      - go run ./cmd/feedrepeater genkey
+
+  test:
+    desc: Run tests
+    cmds:
+      - go test ./... {{.CLI_ARGS}}
+
+  test:cover:
+    desc: Run tests and open the coverage report
+    cmds:
+      - go test -coverprofile=coverage.out ./...
+      - go tool cover -html=coverage.out
+
+  check:
+    desc: Format, vet, and test
+    cmds:
+      - gofmt -l -w .
+      - go vet ./...
+      - go test ./...
+
+  tidy:
+    desc: Tidy go.mod
+    cmds:
+      - go mod tidy
+
+  # --- database -------------------------------------------------------------
+
+  db:
+    desc: Open a SQLite shell on the dev database
+    interactive: true
+    cmds:
+      - |
+        {{.ENV}}
+        sqlite3 -header -column "${FR_DB_PATH:-{{.DB}}}"
+
+  db:tables:
+    desc: List tables with row counts
+    silent: true
+    cmds:
+      - |
+        {{.ENV}}
+        DB="${FR_DB_PATH:-{{.DB}}}"
+        sqlite3 "$DB" "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'" |
+        while read -r t; do
+          printf '%-16s %s\n' "$t" "$(sqlite3 "$DB" "SELECT count(*) FROM \"$t\"")"
+        done
+
+  db:schema:
+    desc: Print the schema
+    cmds:
+      - |
+        {{.ENV}}
+        sqlite3 "${FR_DB_PATH:-{{.DB}}}" .schema
+
+  db:queue:
+    desc: Show queued and recent deliveries
+    silent: true
+    cmds:
+      - |
+        {{.ENV}}
+        sqlite3 -header -column "${FR_DB_PATH:-{{.DB}}}" "
+          SELECT d.id, d.status, d.attempts, dest.kind, substr(i.title, 1, 40) AS title,
+                 datetime(d.updated_at, 'unixepoch') AS updated, substr(d.last_error, 1, 60) AS error
+          FROM deliveries d
+          JOIN destinations dest ON dest.id = d.destination_id
+          JOIN items i ON i.id = d.item_id
+          ORDER BY d.id DESC LIMIT 20"
+
+  db:feeds:
+    desc: Show feeds and their poll state
+    silent: true
+    cmds:
+      - |
+        {{.ENV}}
+        sqlite3 -header -column "${FR_DB_PATH:-{{.DB}}}" "
+          SELECT f.id, u.acct || '@' || u.host AS account, substr(f.url, 1, 45) AS url,
+                 f.primed, f.paused, f.failures,
+                 datetime(f.last_fetch_at, 'unixepoch') AS last_fetch,
+                 datetime(f.next_fetch_at, 'unixepoch') AS next_fetch,
+                 substr(f.last_error, 1, 40) AS error
+          FROM feeds f JOIN users u ON u.id = f.user_id"
+
+  db:due:
+    desc: Mark the feed due so the next tick polls it
+    silent: true
+    cmds:
+      - |
+        {{.ENV}}
+        sqlite3 "${FR_DB_PATH:-{{.DB}}}" "UPDATE feeds SET next_fetch_at = unixepoch()"
+        echo "feeds marked due"
+
+  db:reset:
+    desc: Delete the dev database
+    prompt: This deletes the dev database and everything in it. Continue?
+    cmds:
+      - |
+        {{.ENV}}
+        DB="${FR_DB_PATH:-{{.DB}}}"
+        rm -f "$DB" "$DB-wal" "$DB-shm"
+        echo "removed $DB"
+
+  db:backup:
+    desc: Write a consistent copy of the dev database to backup.db
+    cmds:
+      - |
+        {{.ENV}}
+        sqlite3 "${FR_DB_PATH:-{{.DB}}}" ".backup backup.db"
+        echo "wrote backup.db"
+
+  # --- docker ---------------------------------------------------------------
+
+  docker:build:
+    desc: Build the container image
+    cmds:
+      - docker build -t feedrepeater:latest .
+
+  docker:up:
+    desc: Start the stack with docker compose
+    dir: deploy
+    cmds:
+      - docker compose up -d --build
+
+  docker:down:
+    desc: Stop the stack
+    dir: deploy
+    cmds:
+      - docker compose down
+
+  docker:logs:
+    desc: Follow container logs
+    dir: deploy
+    cmds:
+      - docker compose logs -f --tail=100
+
+  docker:shell:
+    desc: Open a shell in the running container
+    dir: deploy
+    interactive: true
+    cmds:
+      - docker compose exec feedrepeater sh
+
+  # --- litestream -----------------------------------------------------------
+
+  litestream:status:
+    desc: Show replica snapshots for the production database
+    dir: deploy
+    cmds:
+      - docker compose exec feedrepeater litestream snapshots -config /etc/litestream.yml $FR_DB_PATH
+
+  litestream:restore:
+    desc: Restore the production database from its replica into deploy/restored.db
+    dir: deploy
+    cmds:
+      - docker compose exec feedrepeater litestream restore -config /etc/litestream.yml -o /tmp/restored.db $FR_DB_PATH
+      - docker compose cp feedrepeater:/tmp/restored.db ./restored.db
+      - echo "wrote deploy/restored.db"
+
+  # --- dependencies ---------------------------------------------------------
+
+  vuln:
+    desc: Scan dependencies for known vulnerabilities
+    cmds:
+      - go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+
+  outdated:
+    desc: List dependencies with newer versions available
+    cmds:
+      - go list -u -m all

@@ -1,0 +1,14 @@
+# Litestream streams the SQLite WAL to object storage.
+#
+# The replica holds the database verbatim, including the encrypted credential
+# columns. Those stay unreadable without FR_SECRET_KEY, which is why the key
+# must never be stored in the same place as the backups.
+
+dbs:
+  - path: ${FR_DB_PATH}
+    replicas:
+      - url: ${LITESTREAM_REPLICA_URL}
+        # Keep a day of granular restore points and a month of snapshots.
+        retention: 720h
+        snapshot-interval: 24h
+        sync-interval: 10s

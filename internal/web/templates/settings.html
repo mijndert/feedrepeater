@@ -1,0 +1,18 @@
+{{define "content"}}
+<h1>Settings</h1>
+
+<dl class="facts">
+  <dt>Account</dt><dd>{{.User.Handle}}</dd>
+  <dt>Instance</dt><dd>{{.User.Host}}</dd>
+  <dt>Joined</dt><dd>{{datetime .User.CreatedAt}}</dd>
+</dl>
+
+<h2>Delete account</h2>
+<p>Removes your feed, destinations, history, and stored credentials. Posts already published stay where they are.</p>
+<form method="post" action="/settings/delete" class="stack">
+  <input type="hidden" name="csrf" value="{{.CSRF}}">
+  <label for="confirm">Type <code>{{.User.Acct}}</code> to confirm</label>
+  <input type="text" id="confirm" name="confirm" autocapitalize="off" autocorrect="off" spellcheck="false" required>
+  <button type="submit" class="danger">Delete account</button>
+</form>
+{{end}}

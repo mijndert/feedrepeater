@@ -1,0 +1,179 @@
+package store
+
+import (
+	"context"
+	"database/sql"
+	"errors"
+	"time"
+)
+
+// UpsertUser creates or refreshes a user identified by (host, remote_id).
+func (s *Store) UpsertUser(ctx context.Context, u *User) (*User, error) {
+	now := time.Now().UTC()
+	var created int64
+	err := s.db.QueryRowContext(ctx, `
+		INSERT INTO users (host, remote_id, acct, display_name, avatar_url, access_token, created_at, last_login_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT (host, remote_id) DO UPDATE SET
+			acct = excluded.acct,
+			display_name = excluded.display_name,
+			avatar_url = excluded.avatar_url,
+			access_token = excluded.access_token,
+			last_login_at = excluded.last_login_at
+		RETURNING id, created_at`,
+		u.Host, u.RemoteID, u.Acct, u.DisplayName, u.AvatarURL, u.AccessToken, now.Unix(), now.Unix(),
+	).Scan(&u.ID, &created)
+	if err != nil {
+		return nil, err
+	}
+	u.CreatedAt = time.Unix(created, 0).UTC()
+	u.LastLoginAt = now
+	return u, nil
+}
+
+// UserByRemote finds a user by the identity an instance reports.
+func (s *Store) UserByRemote(ctx context.Context, host, remoteID string) (*User, error) {
+	return s.scanUser(s.db.QueryRowContext(ctx, `
+		SELECT id, host, remote_id, acct, display_name, avatar_url, access_token, created_at, last_login_at
+		FROM users WHERE host = ? AND remote_id = ?`, host, remoteID))
+}
+
+func (s *Store) UserByID(ctx context.Context, id int64) (*User, error) {
+	return s.scanUser(s.db.QueryRowContext(ctx, `
+		SELECT id, host, remote_id, acct, display_name, avatar_url, access_token, created_at, last_login_at
+		FROM users WHERE id = ?`, id))
+}
+
+func (s *Store) scanUser(row *sql.Row) (*User, error) {
+	var u User
+	var created, login int64
+	err := row.Scan(&u.ID, &u.Host, &u.RemoteID, &u.Acct, &u.DisplayName, &u.AvatarURL, &u.AccessToken, &created, &login)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	u.CreatedAt = time.Unix(created, 0).UTC()
+	u.LastLoginAt = time.Unix(login, 0).UTC()
+	return &u, nil
+}
+
+// DeleteUser removes the account and, by cascade, everything owned by it.
+func (s *Store) DeleteUser(ctx context.Context, id int64) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM users WHERE id = ?`, id)
+	return err
+}
+
+// CountRecentUsersByHost reports how many accounts a single instance has
+// registered since a given time.
+func (s *Store) CountRecentUsersByHost(ctx context.Context, host string, since time.Time) (int, error) {
+	var n int
+	err := s.db.QueryRowContext(ctx,
+		`SELECT count(*) FROM users WHERE host = ? AND created_at >= ?`, host, since.Unix()).Scan(&n)
+	return n, err
+}
+
+// CountUsers reports the number of registered accounts.
+func (s *Store) CountUsers(ctx context.Context) (int, error) {
+	var n int
+	err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM users`).Scan(&n)
+	return n, err
+}
+
+// --- OAuth client registrations -------------------------------------------
+
+func (s *Store) Instance(ctx context.Context, host string) (*Instance, error) {
+	var in Instance
+	var created int64
+	err := s.db.QueryRowContext(ctx,
+		`SELECT host, client_id, client_secret, redirect_uri, created_at FROM instances WHERE host = ?`, host,
+	).Scan(&in.Host, &in.ClientID, &in.ClientSecret, &in.RedirectURI, &created)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	in.CreatedAt = time.Unix(created, 0).UTC()
+	return &in, nil
+}
+
+func (s *Store) SaveInstance(ctx context.Context, in *Instance) error {
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO instances (host, client_id, client_secret, redirect_uri, created_at)
+		VALUES (?, ?, ?, ?, ?)
+		ON CONFLICT (host) DO UPDATE SET
+			client_id = excluded.client_id,
+			client_secret = excluded.client_secret,
+			redirect_uri = excluded.redirect_uri,
+			created_at = excluded.created_at`,
+		in.Host, in.ClientID, in.ClientSecret, in.RedirectURI, time.Now().UTC().Unix())
+	return err
+}
+
+// --- OAuth states ----------------------------------------------------------
+
+// PutOAuthState records an in-flight authorisation. id is the hash of the state
+// value handed to the browser.
+func (s *Store) PutOAuthState(ctx context.Context, id, host string, verifier []byte, ttl time.Duration) error {
+	now := time.Now().UTC()
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO oauth_states (id, host, code_verifier, created_at, expires_at)
+		VALUES (?, ?, ?, ?, ?)`,
+		id, host, verifier, now.Unix(), now.Add(ttl).Unix())
+	return err
+}
+
+// TakeOAuthState consumes a state exactly once, returning the host and verifier
+// recorded when the flow started. A replayed callback finds nothing.
+func (s *Store) TakeOAuthState(ctx context.Context, id string) (host string, verifier []byte, err error) {
+	var expires int64
+	err = s.db.QueryRowContext(ctx,
+		`DELETE FROM oauth_states WHERE id = ? RETURNING host, code_verifier, expires_at`, id,
+	).Scan(&host, &verifier, &expires)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil, ErrNotFound
+	}
+	if err != nil {
+		return "", nil, err
+	}
+	if time.Now().UTC().Unix() > expires {
+		return "", nil, ErrNotFound
+	}
+	return host, verifier, nil
+}
+
+// --- Sessions --------------------------------------------------------------
+
+func (s *Store) CreateSession(ctx context.Context, id string, userID int64, ttl time.Duration) error {
+	now := time.Now().UTC()
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO sessions (id, user_id, created_at, expires_at) VALUES (?, ?, ?, ?)`,
+		id, userID, now.Unix(), now.Add(ttl).Unix())
+	return err
+}
+
+// SessionUser returns the user for a live session, or ErrNotFound if the
+// session is unknown or expired.
+func (s *Store) SessionUser(ctx context.Context, sessionID string) (*User, error) {
+	return s.scanUser(s.db.QueryRowContext(ctx, `
+		SELECT u.id, u.host, u.remote_id, u.acct, u.display_name, u.avatar_url, u.access_token, u.created_at, u.last_login_at
+		FROM sessions s JOIN users u ON u.id = s.user_id
+		WHERE s.id = ? AND s.expires_at > ?`, sessionID, time.Now().UTC().Unix()))
+}
+
+func (s *Store) DeleteSession(ctx context.Context, sessionID string) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM sessions WHERE id = ?`, sessionID)
+	return err
+}
+
+// DeleteExpired clears rows that have outlived their usefulness.
+func (s *Store) DeleteExpired(ctx context.Context) error {
+	now := time.Now().UTC().Unix()
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM sessions WHERE expires_at < ?`, now); err != nil {
+		return err
+	}
+	_, err := s.db.ExecContext(ctx, `DELETE FROM oauth_states WHERE expires_at < ?`, now)
+	return err
+}

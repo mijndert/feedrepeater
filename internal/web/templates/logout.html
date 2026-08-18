@@ -1,0 +1,11 @@
+{{define "content"}}
+<h1>Sign out?</h1>
+<p>You'll need to sign in with {{.User.Handle}} again to come back.</p>
+<p class="hint">Your feed keeps being checked and posted while you're signed out.</p>
+
+<form method="post" action="/logout" class="row">
+  <input type="hidden" name="csrf" value="{{.CSRF}}">
+  <button type="submit" class="primary">Sign out</button>
+  <a class="button" href="/dashboard">Cancel</a>
+</form>
+{{end}}

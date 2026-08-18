@@ -1,0 +1,37 @@
+services:
+  feedrepeater:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: feedrepeater:latest
+    restart: unless-stopped
+    # Caddy runs on the host and proxies to this port. Binding to loopback
+    # keeps the app off the public interface entirely.
+    ports:
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - feedrepeater-data:/data
+    environment:
+      FR_BASE_URL: ${FR_BASE_URL:?set FR_BASE_URL}
+      FR_SECRET_KEY: ${FR_SECRET_KEY:?generate with: feedrepeater genkey}
+      FR_DB_PATH: /data/feedrepeater.db
+      FR_ADDR: 0.0.0.0:8080
+      FR_MIN_POLL_INTERVAL: ${FR_MIN_POLL_INTERVAL:-15m}
+      LITESTREAM_REPLICA_URL: ${LITESTREAM_REPLICA_URL:-}
+      LITESTREAM_ACCESS_KEY_ID: ${LITESTREAM_ACCESS_KEY_ID:-}
+      LITESTREAM_SECRET_ACCESS_KEY: ${LITESTREAM_SECRET_ACCESS_KEY:-}
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  feedrepeater-data:

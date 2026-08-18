@@ -1,0 +1,42 @@
+# syntax=docker/dockerfile:1
+
+FROM golang:1.26-alpine AS build
+WORKDIR /src
+
+# Dependencies first, so a source-only change reuses this layer.
+COPY go.mod go.sum ./
+RUN --mount=type=cache,target=/go/pkg/mod go mod download
+
+COPY . .
+# CGO stays off: the SQLite driver is pure Go, which is what makes the result a
+# single static binary.
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/feedrepeater ./cmd/feedrepeater
+
+# Taking the binary from the official image, pinned by digest, avoids a
+# build-time download that nothing would verify.
+FROM litestream/litestream:0.5.16@sha256:f085f8bce71a5ad4ce8e28b28ea522de1d9e0d7dd0af3ea5c1bd626d0f341954 AS litestream
+
+FROM alpine:3.22
+RUN apk add --no-cache ca-certificates tzdata \
+ && adduser -D -H -u 10001 feedrepeater \
+ && mkdir -p /data && chown feedrepeater:feedrepeater /data
+
+COPY --from=build /out/feedrepeater /usr/local/bin/feedrepeater
+COPY --from=litestream /usr/local/bin/litestream /usr/local/bin/litestream
+COPY deploy/litestream.yml /etc/litestream.yml
+# Set the mode here rather than relying on the checkout's file permissions.
+COPY --chmod=0755 deploy/entrypoint.sh /usr/local/bin/entrypoint.sh
+
+USER feedrepeater
+WORKDIR /data
+ENV FR_DB_PATH=/data/feedrepeater.db \
+    FR_ADDR=0.0.0.0:8080
+EXPOSE 8080
+VOLUME ["/data"]
+
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s \
+  CMD wget -qO- http://127.0.0.1:8080/healthz >/dev/null || exit 1
+
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

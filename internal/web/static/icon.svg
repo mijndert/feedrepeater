@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16">
+  <!-- The header mark, standing alone. It cannot take its colour from the page
+       here, so the ink is written out, with the dark-scheme value in a media
+       query. A browser that ignores the stylesheet gets the light ink, which is
+       the readable one against the tab strip in either scheme. -->
+  <style>
+    @media (prefers-color-scheme: dark) {
+      .dot { fill: #e9eaee }
+      .arcs { stroke: #e9eaee }
+    }
+  </style>
+  <circle class="dot" cx="8" cy="8" r="1.5" fill="#14161a"/>
+  <g class="arcs" fill="none" stroke="#14161a" stroke-width="1.4" stroke-linecap="round">
+    <path d="M10.6 4.9a4 4 0 0 1 0 6.2"/>
+    <path d="M12.2 3a6.5 6.5 0 0 1 0 10"/>
+    <path d="M5.4 4.9a4 4 0 0 0 0 6.2"/>
+    <path d="M3.8 3a6.5 6.5 0 0 0 0 10"/>
+  </g>
+</svg>

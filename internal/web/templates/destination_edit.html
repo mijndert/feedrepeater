@@ -1,0 +1,82 @@
+{{define "content"}}
+{{$f := .Data}}
+{{$d := $f.Dest}}
+<p class="back"><a href="/dashboard">Back</a></p>
+<h1>{{$d.Label}}</h1>
+<p class="meta">{{kindLabel $d.Kind}} · {{$f.Account}}</p>
+
+{{if $f.NewSecret}}
+<div class="callout">
+  <p><strong>Signing secret</strong></p>
+  <p class="secret"><code>{{$f.NewSecret}}</code></p>
+  <p class="hint">Shown once. Verify the <code>X-Feedrepeater-Signature</code> header as
+     <code>sha256=HMAC-SHA256(secret, timestamp + "." + body)</code>, where the timestamp is the
+     <code>X-Feedrepeater-Timestamp</code> header.</p>
+</div>
+{{end}}
+
+{{if $d.LastError}}<p class="error">Last attempt failed: {{$d.LastError}}</p>{{end}}
+
+<form method="post" action="/destinations/{{$d.ID}}" class="stack">
+  <input type="hidden" name="csrf" value="{{.CSRF}}">
+
+  <label for="label">Name</label>
+  <input type="text" id="label" name="label" value="{{$f.Label}}" maxlength="80">
+
+  {{if eq $d.Kind "mastodon"}}
+    <label for="visibility">Visibility</label>
+    <select id="visibility" name="visibility">
+      {{range $f.Visibilities}}<option value="{{.}}"{{if eq . $f.Visibility}} selected{{end}}>{{.}}</option>{{end}}
+    </select>
+  {{end}}
+
+  {{if eq $d.Kind "bluesky"}}
+    <label for="app_password">Replace app password</label>
+    <input type="password" id="app_password" name="app_password" autocomplete="new-password" placeholder="Leave empty to keep the current one">
+  {{end}}
+
+  {{if eq $d.Kind "discord"}}
+    <label for="url">Replace webhook URL</label>
+    <input type="url" id="url" name="url" placeholder="Leave empty to keep the current one"
+           autocomplete="off" spellcheck="false">
+    <p class="hint">The stored URL is a credential and is not shown again. A new one is checked with Discord before it replaces it.</p>
+  {{end}}
+
+  {{if eq $d.Kind "slack"}}
+    <label for="url">Replace webhook URL</label>
+    <input type="url" id="url" name="url" placeholder="Leave empty to keep the current one"
+           autocomplete="off" spellcheck="false">
+    <p class="hint">The stored URL is a credential and is not shown again. A new one is checked by posting one line to its channel.</p>
+  {{end}}
+
+  {{if eq $d.Kind "webhook"}}
+    <label for="url">URL</label>
+    <input type="url" id="url" name="url" value="{{$f.URL}}" required>
+    <label class="checkbox"><input type="checkbox" name="rotate" value="1"> Generate a new signing secret</label>
+  {{end}}
+
+  <label for="template">Post text</label>
+  <textarea id="template" name="template" rows="4">{{$f.Template}}</textarea>
+  <p class="hint">Placeholders: {{range $i, $v := $f.Variables}}{{if $i}}, {{end}}<code>{{"{{"}}{{$v.Name}}{{"}}"}}</code>{{end}}</p>
+
+  {{if $f.Preview}}
+  <p class="hint">Preview</p>
+  <pre class="preview">{{$f.Preview}}</pre>
+  {{end}}
+
+  <label class="checkbox"><input type="checkbox" name="paused" value="1"{{if $f.Paused}} checked{{end}}> Paused</label>
+
+  <button type="submit" class="primary">Save</button>
+</form>
+
+<div class="row">
+  <form method="post" action="/destinations/{{$d.ID}}/test">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <button type="submit">Send test post</button>
+  </form>
+  <form method="post" action="/destinations/{{$d.ID}}/delete" class="right">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <button type="submit" class="quiet danger">Remove</button>
+  </form>
+</div>
+{{end}}

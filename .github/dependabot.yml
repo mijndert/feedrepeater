@@ -1,0 +1,87 @@
+version: 2
+
+# Three things in this repository carry versions that drift: the Go module
+# graph, the images the Dockerfile builds from, and any workflow actions.
+# Security updates arrive regardless of schedule; the weekly cadence below is
+# for ordinary version bumps.
+
+updates:
+  # ── Go dependencies ──────────────────────────────────────────────────────
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "07:00"
+      timezone: Europe/Amsterdam
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: deps
+    groups:
+      # golang.org/x/* move together and almost never break anything on their
+      # own; one pull request instead of five.
+      golang-x:
+        patterns:
+          - golang.org/x/*
+      # Everything else that is only a patch or minor bump.
+      minor-and-patch:
+        update-types:
+          - minor
+          - patch
+        exclude-patterns:
+          - golang.org/x/*
+    ignore:
+      # The toolchain is pinned deliberately in go.mod and the Dockerfile, and
+      # they have to move together. Bump it by hand.
+      - dependency-name: go
+        update-types:
+          - version-update:semver-major
+          - version-update:semver-minor
+
+  # ── Container base images ────────────────────────────────────────────────
+  # Covers golang:1.26-alpine, alpine:3.22, and the digest-pinned
+  # litestream/litestream image. Dependabot updates a pinned digest in place,
+  # which is the only way that pin stays both fixed and current.
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "07:00"
+      timezone: Europe/Amsterdam
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: docker
+    groups:
+      images:
+        patterns:
+          - "*"
+
+  # ── Compose file ─────────────────────────────────────────────────────────
+  # Nothing external is pinned here today — the service builds from the local
+  # Dockerfile — but this keeps it covered if an image is ever referenced.
+  - package-ecosystem: docker-compose
+    directory: /deploy
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: docker
+
+  # ── GitHub Actions ───────────────────────────────────────────────────────
+  # No workflows exist yet; this is here so the first one added is covered
+  # without anyone remembering to come back and configure it.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "07:00"
+      timezone: Europe/Amsterdam
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: ci
+    groups:
+      actions:
+        patterns:
+          - "*"

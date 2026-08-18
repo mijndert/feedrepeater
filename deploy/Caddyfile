@@ -1,0 +1,38 @@
+# Caddy runs on the host and terminates TLS. feedrepeater listens on loopback
+# only, so this is the sole way in.
+
+feedrepeater.com {
+	encode zstd gzip
+
+	# The app sets its own security headers; these cover what a proxy is better
+	# placed to know or to strip.
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+		-Server
+		-X-Powered-By
+	}
+
+	# Static assets are immutable per deploy and safe to cache at the edge.
+	@static path /static/*
+	header @static Cache-Control "public, max-age=3600"
+
+	reverse_proxy 127.0.0.1:8080 {
+		# The app reads the last X-Forwarded-For entry for rate limiting, so it
+		# must be one Caddy appended rather than one the client sent.
+		header_up X-Forwarded-For {remote_host}
+		header_up X-Real-IP {remote_host}
+
+		# Feed validation and OAuth exchanges reach third-party servers while the
+		# request is open.
+		transport http {
+			read_timeout 60s
+		}
+	}
+
+	log {
+		output file /var/log/caddy/feedrepeater.log {
+			roll_size 20mb
+			roll_keep 5
+		}
+	}
+}

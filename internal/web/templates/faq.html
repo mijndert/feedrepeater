@@ -1,0 +1,47 @@
+{{define "content"}}
+<h1 class="title-block">FAQ</h1>
+
+<dl class="qa">
+  <dt>What does feedrepeater do?</dt>
+  <dd>It watches an RSS or Atom feed and posts new entries to Mastodon, Bluesky, Discord, Slack, and webhooks.</dd>
+
+  <dt>What address do I add?</dt>
+  <dd>The feed's own address, or the site's. If the page you give links to a feed, that is the one saved.</dd>
+
+  <dt>Will it post entries I already have?</dt>
+  <dd>No. Everything in the feed when you add it is recorded as seen. Only entries that appear afterwards go out.</dd>
+
+  <dt>How often is my feed checked?</dt>
+  <dd>Every {{.Data.Interval}}, whether or not it has been publishing. The rate never slows down during the beta.</dd>
+
+  <dt>How many feeds and destinations do I get?</dt>
+  <dd>One feed during the beta, and one destination per service: a Mastodon account, a Bluesky account, a Discord channel, a Slack channel, and a webhook. Untick one on the dashboard to stop publishing to it without disconnecting it.</dd>
+
+  <dt>What if a feed publishes a lot at once?</dt>
+  <dd>At most {{.Data.MaxItems}} entries are posted per check. The rest are recorded as seen, so a feed that renumbers its ids cannot flood your timeline.</dd>
+
+  <dt>Why sign in with Mastodon?</dt>
+  <dd>It is the account you post from, so it also serves as your identity here. Any instance works. Your password is never sent to feedrepeater: the instance grants permission to read your account and post statuses, and deleting your account revokes it.</dd>
+
+  <dt>How do Discord and Slack connect?</dt>
+  <dd>With a webhook URL you create in the channel. That URL is all it takes to post there, so it is stored encrypted and never shown again; replace it here or revoke it in the channel's settings. Discord is checked without posting anything. Slack offers no way to check a webhook without using it, so connecting posts one line to the channel.</dd>
+
+  <dt>Why does Bluesky need an app password?</dt>
+  <dd>Use an app password from your Bluesky settings, not your account password. It is stored encrypted, and you can revoke it from Bluesky at any time.</dd>
+
+  <dt>What does a webhook receive?</dt>
+  <dd>A JSON POST signed with HMAC-SHA256 under a secret shown once when you add the destination. The address has to echo back a challenge before it is saved, and again if you change it.</dd>
+
+  <dt>Can I change the post text?</dt>
+  <dd>Every destination has its own template with a fixed set of placeholders: <code>{{"{{title}} {{url}} {{summary}} {{author}} {{feed_title}} {{published}}"}}</code>. Text is trimmed to each service's limit by shortening the summary first, then the title. The link is never cut.</dd>
+
+  <dt>What happens when something fails?</dt>
+  <dd>A failed post is retried with a growing delay before it is abandoned, and one that has given up has a Retry button on your dashboard. A feed that keeps failing is still tried on the same schedule, unless its server asks for room, and is paused after about two weeks of it, with the reason on your dashboard.</dd>
+
+  <dt>What is stored, and how do I remove it?</dt>
+  <dd>Your feed, the entries read from it, delivery history, and the credentials for your destinations. Credentials are encrypted. Deleting your account in Settings removes all of it. Posts already published stay where they are.</dd>
+
+  <dt>What does it cost?</dt>
+  <dd>Nothing. There is no billing during the beta.</dd>
+</dl>
+{{end}}

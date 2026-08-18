@@ -1,0 +1,74 @@
+{{define "content"}}
+{{$f := .Data}}
+<p class="back"><a href="/dashboard">Back</a></p>
+<h1>Add {{$f.Kind.Label}}</h1>
+<p>{{$f.Kind.Description}}</p>
+
+<form method="post" action="/destinations" class="stack">
+  <input type="hidden" name="csrf" value="{{.CSRF}}">
+  <input type="hidden" name="kind" value="{{$f.Kind.Name}}">
+
+  {{if eq $f.Kind.Name "mastodon"}}
+    <p class="facts-inline">Posts as <strong>{{$f.Account}}</strong>, using the permission granted when you signed in.</p>
+    <label for="visibility">Visibility</label>
+    <select id="visibility" name="visibility">
+      {{range $f.Visibilities}}<option value="{{.}}"{{if eq . "public"}} selected{{end}}>{{.}}</option>{{end}}
+    </select>
+  {{end}}
+
+  {{if eq $f.Kind.Name "bluesky"}}
+    <label for="handle">Handle</label>
+    <input type="text" id="handle" name="handle" value="{{$f.Handle}}" placeholder="name.bsky.social"
+           autocapitalize="off" autocorrect="off" spellcheck="false" required>
+    <label for="app_password">App password</label>
+    <input type="password" id="app_password" name="app_password" autocomplete="new-password" required>
+    <p class="hint">Create one in Bluesky under Settings, Privacy and security, App passwords. Your account password will not work.</p>
+  {{end}}
+
+  {{if eq $f.Kind.Name "discord"}}
+    <label for="url">Webhook URL</label>
+    <input type="url" id="url" name="url" placeholder="https://discord.com/api/webhooks/…"
+           autocomplete="off" spellcheck="false" required>
+    <p class="hint">
+      In Discord: Edit Channel, Integrations, Webhooks, New Webhook, Copy Webhook URL.
+      Anyone holding that URL can post to the channel, so it is stored encrypted and
+      not shown again. We check it with Discord when you save, without posting anything.
+    </p>
+  {{end}}
+
+  {{if eq $f.Kind.Name "slack"}}
+    <label for="url">Webhook URL</label>
+    <input type="url" id="url" name="url" placeholder="https://hooks.slack.com/services/…"
+           autocomplete="off" spellcheck="false" required>
+    <p class="hint">
+      In Slack: create an app, enable Incoming Webhooks, add one to a channel, copy the URL.
+      Anyone holding that URL can post to the channel, so it is stored encrypted and not
+      shown again. Slack has no way to check a webhook without using it, so saving posts
+      one line to the channel.
+    </p>
+  {{end}}
+
+  {{if eq $f.Kind.Name "webhook"}}
+    <label for="url">URL</label>
+    <input type="url" id="url" name="url" value="{{$f.URL}}" placeholder="https://example.com/hook" required>
+    <p class="hint">
+      Receives a POST with a JSON body, signed with a secret shown once after you save.
+    </p>
+    <p class="hint">
+      To confirm you control this address, we send it
+      <code>{"event":"verification","challenge":"…"}</code> when you save. Answer with
+      the challenge value, either as the whole body or as
+      <code>{"challenge":"…"}</code>.
+    </p>
+  {{end}}
+
+  <label for="label">Name</label>
+  <input type="text" id="label" name="label" value="{{$f.Label}}" maxlength="80">
+
+  <label for="template">Post text</label>
+  <textarea id="template" name="template" rows="4">{{$f.Template}}</textarea>
+  <p class="hint">Placeholders: {{range $i, $v := $f.Variables}}{{if $i}}, {{end}}<code>{{"{{"}}{{$v.Name}}{{"}}"}}</code>{{end}}</p>
+
+  <button type="submit" class="primary">Add destination</button>
+</form>
+{{end}}
