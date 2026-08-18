@@ -33,8 +33,6 @@ tasks:
         FR_BASE_URL=http://localhost:8080
         FR_ADDR=127.0.0.1:8080
         FR_DB_PATH=dev.db
-        # Poll faster than the 15m production default while developing.
-        FR_MIN_POLL_INTERVAL=1m
         EOF
       - echo "wrote .env"
 
@@ -182,10 +180,14 @@ tasks:
       - docker build -t feedrepeater:latest .
 
   docker:up:
-    desc: Start the stack with docker compose
+    desc: Pull the published image and start the stack
     dir: deploy
     cmds:
-      - docker compose up -d --build
+      # The image comes from the registry now, so the pull is what picks up a new
+      # build. `up -d` on its own is happy to keep running the copy it already
+      # has, however old the tag it was fetched under.
+      - docker compose pull
+      - docker compose up -d
 
   docker:down:
     desc: Stop the stack

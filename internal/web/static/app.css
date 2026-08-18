@@ -421,8 +421,13 @@ input[type="checkbox"]:disabled {
   border-bottom: 1px solid var(--line);
 }
 /* No rule above the first row: with nothing between it and the section
-   heading, a top border read as an underline on the heading. Each row's bottom
-   border still closes the list. */
+   heading, a top border read as an underline on the heading. */
+
+/* No rule below the last row either. Closing the list there puts a line
+   directly above the Save button, which reads as a divider between the button
+   and the form it belongs to rather than as the end of the list. The row
+   separators alone are enough to group them. */
+.items li:last-child { border-bottom: none; }
 
 .item-name {
   font-size: .95rem;

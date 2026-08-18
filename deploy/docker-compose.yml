@@ -1,9 +1,13 @@
 services:
   feedrepeater:
-    build:
-      context: ..
-      dockerfile: Dockerfile
-    image: feedrepeater:latest
+    # Published by .github/workflows/image.yml. Pulling a finished image is what
+    # lets this run somewhere without the source tree or a Go toolchain, which
+    # is the case on the NAS during the beta.
+    #
+    # :latest follows main. Set FEEDREPEATER_TAG to one of the sha-<commit> tags
+    # to hold a known-good build when a push breaks something — by the time you
+    # notice, :latest has already moved.
+    image: ghcr.io/mijndert/feedrepeater:${FEEDREPEATER_TAG:-latest}
     restart: unless-stopped
     # Caddy runs on the host and proxies to this port. Binding to loopback
     # keeps the app off the public interface entirely.
@@ -13,7 +17,9 @@ services:
       - feedrepeater-data:/data
     environment:
       FR_BASE_URL: ${FR_BASE_URL:?set FR_BASE_URL}
-      FR_SECRET_KEY: ${FR_SECRET_KEY:?generate with: feedrepeater genkey}
+      # Quoted because the message carries a colon, which YAML would otherwise
+      # read as the start of another mapping.
+      FR_SECRET_KEY: "${FR_SECRET_KEY:?generate with: feedrepeater genkey}"
       FR_DB_PATH: /data/feedrepeater.db
       FR_ADDR: 0.0.0.0:8080
       FR_MIN_POLL_INTERVAL: ${FR_MIN_POLL_INTERVAL:-15m}

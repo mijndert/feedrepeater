@@ -1,6 +1,10 @@
 # syntax=docker/dockerfile:1
 
-FROM golang:1.26-alpine AS build
+# Pinned to the builder's own architecture on purpose. With CGO off the Go
+# toolchain cross-compiles for free, so building an arm64 image on an amd64
+# runner costs nothing; letting this stage run as arm64 instead would compile
+# the whole module under QEMU for no gain.
+FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS build
 WORKDIR /src
 
 # Dependencies first, so a source-only change reuses this layer.
@@ -8,11 +12,15 @@ COPY go.mod go.sum ./
 RUN --mount=type=cache,target=/go/pkg/mod go mod download
 
 COPY . .
+# Supplied by BuildKit. They are empty on a plain `docker build`, which is the
+# same as asking for the host's own platform.
+ARG TARGETOS TARGETARCH
 # CGO stays off: the SQLite driver is pure Go, which is what makes the result a
 # single static binary.
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
-    CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/feedrepeater ./cmd/feedrepeater
+    CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
+    go build -trimpath -ldflags="-s -w" -o /out/feedrepeater ./cmd/feedrepeater
 
 # Taking the binary from the official image, pinned by digest, avoids a
 # build-time download that nothing would verify.
