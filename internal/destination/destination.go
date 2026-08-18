@@ -7,7 +7,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"net/url"
+	"strconv"
+	"strings"
 	"time"
 
 	"feedrepeater.com/internal/render"
@@ -20,6 +23,7 @@ const (
 	KindBluesky  = "bluesky"
 	KindDiscord  = "discord"
 	KindSlack    = "slack"
+	KindNtfy     = "ntfy"
 	KindWebhook  = "webhook"
 )
 
@@ -96,6 +100,12 @@ var Kinds = []Kind{
 		DefaultTemplate: render.DefaultTemplate,
 	},
 	{
+		Name:            KindNtfy,
+		Label:           "ntfy",
+		Description:     "Push a notification to a phone through an ntfy topic.",
+		DefaultTemplate: render.DefaultTemplate,
+	},
+	{
 		Name:            KindWebhook,
 		Label:           "Webhook",
 		Description:     "Send a signed JSON request to a URL you control.",
@@ -154,6 +164,32 @@ func RetryAfter(err error) (time.Duration, bool) {
 		return r.after, true
 	}
 	return 0, false
+}
+
+// headerRetryAfter reads a Retry-After header in both of its forms, a delay in
+// seconds or an HTTP date, and bounds it by maxRetryAfter. Services with a
+// richer answer than the header — Discord puts a fractional value in the body —
+// parse their own.
+func headerRetryAfter(v string) time.Duration {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return 0
+	}
+	var out time.Duration
+	if secs, err := strconv.Atoi(v); err == nil {
+		if secs <= 0 {
+			return 0
+		}
+		out = time.Duration(secs) * time.Second
+	} else if t, err := http.ParseTime(v); err == nil {
+		if out = time.Until(t); out <= 0 {
+			return 0
+		}
+	}
+	if out > maxRetryAfter {
+		return maxRetryAfter
+	}
+	return out
 }
 
 // IsPermanent reports whether an error should end retries.

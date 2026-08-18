@@ -1244,3 +1244,200 @@ func TestSignOutRequiresAPost(t *testing.T) {
 		t.Error("a refused sign-out ended the session anyway")
 	}
 }
+
+// Settings is the first page with preferences on it, so the round trip is worth
+// asserting: what is saved comes back in the form, and what is rejected is shown
+// back rather than discarded.
+func TestSettingsSavePreferences(t *testing.T) {
+	h := newHarness(t)
+	user, cookie, csrf := h.signIn(t, "alice")
+	ctx := context.Background()
+
+	post := postForm("/settings", url.Values{
+		"csrf":             {csrf},
+		"timezone":         {"Europe/Amsterdam"},
+		"default_template": {"{{title}} — {{feed_title}}\n{{url}}"},
+	})
+	post.AddCookie(cookie)
+	if rec := h.do(post); rec.Code != http.StatusSeeOther {
+		t.Fatalf("saving settings = %d, want 303: %s", rec.Code, rec.Body)
+	}
+
+	saved, err := h.store.UserByID(ctx, user.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if saved.Timezone != "Europe/Amsterdam" {
+		t.Errorf("stored timezone = %q", saved.Timezone)
+	}
+	if !strings.Contains(saved.DefaultTemplate, "{{feed_title}}") {
+		t.Errorf("stored template = %q", saved.DefaultTemplate)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/settings", nil)
+	req.AddCookie(cookie)
+	body := h.do(req).Body.String()
+	if !strings.Contains(body, `value="Europe/Amsterdam"`) {
+		t.Error("the saved timezone does not come back in the form")
+	}
+	// The preview is the only way to see what a template does before a
+	// destination uses it.
+	if !strings.Contains(body, `class="preview"`) {
+		t.Error("the settings page shows no preview of the default template")
+	}
+}
+
+func TestSettingsRejectsUnusableValues(t *testing.T) {
+	h := newHarness(t)
+	user, cookie, csrf := h.signIn(t, "alice")
+	ctx := context.Background()
+
+	cases := map[string]url.Values{
+		"not a zone":        {"timezone": {"Mars/Olympus"}},
+		"the server's zone": {"timezone": {"Local"}},
+		"unknown variable":  {"default_template": {"{{title}} {{secret}}"}},
+	}
+	for name, values := range cases {
+		values.Set("csrf", csrf)
+		post := postForm("/settings", values)
+		post.AddCookie(cookie)
+		rec := h.do(post)
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("%s = %d, want 400", name, rec.Code)
+		}
+		// A rejected form has to keep what was typed, or correcting one field
+		// means retyping the other.
+		for _, v := range values {
+			if v[0] != csrf && !strings.Contains(rec.Body.String(), template.HTMLEscapeString(v[0])) {
+				t.Errorf("%s: the submitted value %q was discarded", name, v[0])
+			}
+		}
+	}
+
+	saved, err := h.store.UserByID(ctx, user.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if saved.Timezone != "" || saved.DefaultTemplate != "" {
+		t.Errorf("a rejected form still wrote something: %+v", saved)
+	}
+}
+
+// The account default exists to be typed once, so the form for a new
+// destination has to start from it rather than from the built-in text.
+func TestNewDestinationStartsFromTheAccountDefault(t *testing.T) {
+	h := newHarness(t)
+	user, cookie, _ := h.signIn(t, "alice")
+	ctx := context.Background()
+
+	const tmpl = "New from {{feed_title}}: {{title}}"
+	if err := h.store.SetUserPreferences(ctx, user.ID, "", tmpl); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/destinations/new?kind=webhook", nil)
+	req.AddCookie(cookie)
+	body := h.do(req).Body.String()
+	if !strings.Contains(body, template.HTMLEscapeString(tmpl)) {
+		t.Error("the form does not start from the account's default template")
+	}
+
+	// Editing the default must not rewrite what an existing destination posts,
+	// so the text is copied at creation rather than referenced.
+	d := &store.Destination{UserID: user.ID, Kind: "webhook", Label: "Hook", Template: "old text {{url}}"}
+	if err := h.store.CreateDestination(ctx, d); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.store.SetUserPreferences(ctx, user.ID, "", "changed {{title}}"); err != nil {
+		t.Fatal(err)
+	}
+	again, err := h.store.Destination(ctx, user.ID, d.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again.Template != "old text {{url}}" {
+		t.Errorf("an existing destination's template changed to %q", again.Template)
+	}
+}
+
+// An ntfy access token is a credential like a Bluesky app password: stored
+// sealed, never rendered back, and kept when an edit leaves the field empty.
+func TestNtfyTokenIsKeptButNeverShown(t *testing.T) {
+	h := newHarness(t)
+	user, cookie, csrf := h.signIn(t, "alice")
+	ctx := context.Background()
+
+	const token = "tk_nTFYtOKENvalue"
+	d := &store.Destination{UserID: user.ID, Kind: "ntfy", Label: "Phone"}
+	if err := h.server.setConfig(d, destination.NtfyConfig{
+		Server: destination.DefaultNtfyServer, Topic: "my-topic", Priority: 3,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.server.setCredentials(d, destination.NtfyCredentials{Token: token}); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.store.CreateDestination(ctx, d); err != nil {
+		t.Fatal(err)
+	}
+	path := "/destinations/" + strconv.FormatInt(d.ID, 10)
+
+	req := httptest.NewRequest(http.MethodGet, path, nil)
+	req.AddCookie(cookie)
+	body := h.do(req).Body.String()
+	if strings.Contains(body, token) {
+		t.Error("the edit form renders the stored access token")
+	}
+	// The topic is not a credential, so unlike a channel webhook it is shown.
+	if !strings.Contains(body, `value="my-topic"`) {
+		t.Error("the topic is not shown back, so it cannot be corrected")
+	}
+
+	// A save that changes only the template must keep the token and must not
+	// publish a notification to prove anything.
+	post := postForm(path, url.Values{
+		"csrf": {csrf}, "label": {"Phone"}, "template": {"{{title}}"},
+		"server": {destination.DefaultNtfyServer}, "topic": {"my-topic"}, "priority": {"3"},
+	})
+	post.AddCookie(cookie)
+	if rec := h.do(post); rec.Code != http.StatusSeeOther {
+		t.Fatalf("saving a template change = %d, want 303: %s", rec.Code, rec.Body)
+	}
+	saved, err := h.store.Destination(ctx, user.ID, d.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := h.server.storedNtfyToken(saved); got != token {
+		t.Errorf("stored token after an unrelated edit = %q, want it unchanged", got)
+	}
+}
+
+// The connect form is the only route to a new destination, so each kind's own
+// fields have to be on it. ntfy's are a topic, a server and a priority.
+func TestNtfyConnectFormOffersItsOwnFields(t *testing.T) {
+	h := newHarness(t)
+	_, cookie, _ := h.signIn(t, "alice")
+
+	req := httptest.NewRequest(http.MethodGet, "/destinations/new?kind=ntfy", nil)
+	req.AddCookie(cookie)
+	rec := h.do(req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET the ntfy form = %d, want 200", rec.Code)
+	}
+	body := rec.Body.String()
+	for _, want := range []string{
+		`name="topic"`,
+		`name="server"`,
+		`value="` + destination.DefaultNtfyServer + `"`, // the hosted service is the default
+		`type="password" id="token"`,                    // the token is entered like a password
+		`name="priority"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("the ntfy form is missing %s", want)
+		}
+	}
+	// A feed should not decide on its own to buzz a phone at max priority.
+	if !strings.Contains(body, `<option value="3" selected>default</option>`) {
+		t.Error("the form does not start at ntfy's own default priority")
+	}
+}

@@ -10,8 +10,38 @@ type User struct {
 	DisplayName string
 	AvatarURL   string
 	AccessToken []byte // encrypted
-	CreatedAt   time.Time
-	LastLoginAt time.Time
+	// Timezone is an IANA name, or empty for UTC.
+	Timezone string
+	// DefaultTemplate is the post text a new destination starts from, or empty
+	// for the built-in one. It is copied onto a destination at creation, so
+	// changing it never rewrites what an existing destination posts.
+	DefaultTemplate string
+	CreatedAt       time.Time
+	LastLoginAt     time.Time
+}
+
+// ParseLocation resolves a stored timezone name.
+//
+// Anything unusable is UTC. A name is validated when it is saved, so a failure
+// here means the zone has since left the tzdata, and a page of dates or a
+// pending delivery must not break over that.
+func ParseLocation(name string) *time.Location {
+	if name == "" {
+		return time.UTC
+	}
+	loc, err := time.LoadLocation(name)
+	if err != nil {
+		return time.UTC
+	}
+	return loc
+}
+
+// Location is the timezone this account reads dates in.
+func (u *User) Location() *time.Location {
+	if u == nil {
+		return time.UTC
+	}
+	return ParseLocation(u.Timezone)
 }
 
 // Handle renders the fully-qualified account name, e.g. @alice@mastodon.social.

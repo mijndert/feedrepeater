@@ -50,6 +50,8 @@ func (p *Publisher) Target(d *store.Destination) (destination.Target, error) {
 		return destination.NewDiscord(p.http, d.Config, creds)
 	case destination.KindSlack:
 		return destination.NewSlack(p.http, d.Config, creds)
+	case destination.KindNtfy:
+		return destination.NewNtfy(p.http, d.Config, creds)
 	case destination.KindWebhook:
 		return destination.NewWebhook(p.http, d.Config, creds)
 	default:
@@ -57,8 +59,9 @@ func (p *Publisher) Target(d *store.Destination) (destination.Target, error) {
 	}
 }
 
-// Compose renders the text a destination would post for an entry.
-func (p *Publisher) Compose(ctx context.Context, t destination.Target, d *store.Destination, item destination.Item) string {
+// Compose renders the text a destination would post for an entry. loc is the
+// timezone {{published}} is rendered in; nil means UTC.
+func (p *Publisher) Compose(ctx context.Context, t destination.Target, d *store.Destination, item destination.Item, loc *time.Location) string {
 	tmpl := d.Template
 	if strings.TrimSpace(tmpl) == "" {
 		tmpl = render.DefaultTemplate
@@ -70,17 +73,18 @@ func (p *Publisher) Compose(ctx context.Context, t destination.Target, d *store.
 		Author:    item.Author,
 		FeedTitle: item.FeedTitle,
 		Published: item.Published,
+		Location:  loc,
 	}, t.Limit(ctx))
 }
 
 // Send publishes one entry to one destination immediately. It is used both by
 // the delivery worker and by the "send a test post" button.
-func (p *Publisher) Send(ctx context.Context, d *store.Destination, item destination.Item, idempotencyKey string) (*destination.Result, error) {
+func (p *Publisher) Send(ctx context.Context, d *store.Destination, item destination.Item, loc *time.Location, idempotencyKey string) (*destination.Result, error) {
 	target, err := p.Target(d)
 	if err != nil {
 		return nil, err
 	}
-	text := p.Compose(ctx, target, d, item)
+	text := p.Compose(ctx, target, d, item, loc)
 	if strings.TrimSpace(text) == "" {
 		return nil, destination.Permanentf("the template produced an empty post")
 	}
@@ -127,7 +131,7 @@ func (p *Publisher) Deliver(ctx context.Context, dl *store.Delivery) {
 		Published: published,
 		FeedTitle: feedTitle,
 		FeedURL:   feedURL,
-	}, idempotencyKey(dl))
+	}, p.location(ctx, dl.UserID), idempotencyKey(dl))
 
 	if err != nil {
 		reason := userMessage(err)
@@ -149,6 +153,18 @@ func (p *Publisher) Deliver(ctx context.Context, dl *store.Delivery) {
 	if err := p.store.MarkDeliverySent(ctx, dl.ID, remote); err != nil {
 		p.log.Error("mark delivered", "delivery", dl.ID, "error", err)
 	}
+}
+
+// location reports the timezone the account reads dates in, which is what
+// {{published}} renders in. A lookup that fails is UTC rather than an abandoned
+// delivery: a date in the wrong zone is a smaller problem than a post that never
+// goes out.
+func (p *Publisher) location(ctx context.Context, userID int64) *time.Location {
+	tz, err := p.store.UserTimezone(ctx, userID)
+	if err != nil {
+		return time.UTC
+	}
+	return store.ParseLocation(tz)
 }
 
 // retry schedules the next attempt. A service that said how long to wait gets

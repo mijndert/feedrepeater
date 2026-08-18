@@ -1,5 +1,5 @@
-// Command feedrepeater posts RSS and Atom entries to Mastodon, Bluesky, and
-// webhooks.
+// Command feedrepeater posts RSS and Atom entries to Mastodon, Bluesky,
+// Discord, Slack, ntfy, and webhooks.
 package main
 
 import (
@@ -13,6 +13,10 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	// Embeds the IANA timezone database, so an account's timezone resolves the
+	// same way wherever the binary runs. Without it a host with no tzdata reads
+	// every zone as UTC, which is a wrong date rather than a visible failure.
+	_ "time/tzdata"
 
 	"feedrepeater.com/internal/config"
 	"feedrepeater.com/internal/feed"

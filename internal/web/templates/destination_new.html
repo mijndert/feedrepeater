@@ -48,6 +48,40 @@
     </p>
   {{end}}
 
+  {{if eq $f.Kind.Name "ntfy"}}
+    <label for="topic">Topic</label>
+    <input type="text" id="topic" name="topic" value="{{$f.Topic}}" placeholder="my-feed-abc123"
+           maxlength="64" autocapitalize="off" autocorrect="off" spellcheck="false" required>
+    <p class="hint">
+      Install ntfy on your phone, subscribe to a topic, and put its name here. On ntfy.sh a
+      topic is public to anyone who guesses the name, so pick one nobody would.
+    </p>
+
+    <label for="server">Server</label>
+    <input type="url" id="server" name="server" value="{{$f.Server}}" placeholder="https://ntfy.sh"
+           autocomplete="off" spellcheck="false">
+    <p class="hint">
+      Your own ntfy server works too, over https. We ask it for <code>/v1/health</code> when you
+      save, so an address that is not an ntfy server cannot be pointed at from here.
+    </p>
+
+    <label for="token">Access token</label>
+    <input type="password" id="token" name="token" autocomplete="new-password"
+           placeholder="Leave empty for an open topic">
+    <p class="hint">Needed only for a reserved topic or a server that requires one. Stored encrypted and not shown again.</p>
+
+    <label for="priority">Priority</label>
+    <select id="priority" name="priority">
+      {{range $f.Priorities}}<option value="{{.Value}}"{{if eq .Value $f.Priority}} selected{{end}}>{{.Label}}</option>{{end}}
+    </select>
+
+    <p class="hint">
+      Saving publishes one notification to the topic, because there is no way to check a topic
+      and token without using them. The notification is titled with the feed and opens the entry
+      when tapped.
+    </p>
+  {{end}}
+
   {{if eq $f.Kind.Name "webhook"}}
     <label for="url">URL</label>
     <input type="url" id="url" name="url" value="{{$f.URL}}" placeholder="https://example.com/hook" required>

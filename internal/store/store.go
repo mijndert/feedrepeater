@@ -27,6 +27,7 @@ var migrations = []string{
 	mustRead("migrations/003_instance_redirect_uri.sql"),
 	mustRead("migrations/004_feed_changed_at.sql"),
 	mustRead("migrations/005_one_destination_per_kind.sql"),
+	mustRead("migrations/006_user_preferences.sql"),
 }
 
 func mustRead(name string) string {

@@ -7,6 +7,14 @@ import (
 	"time"
 )
 
+// userColumns is the column list every user read shares, in the order scanUser
+// expects. Kept in one place so a new column cannot be added to one query and
+// forgotten in another. Every name is qualified because the session lookup joins
+// sessions, which has an id and a created_at of its own.
+const userColumns = `SELECT u.id, u.host, u.remote_id, u.acct, u.display_name, u.avatar_url,
+	u.access_token, u.timezone, u.default_template, u.created_at, u.last_login_at
+	FROM users u`
+
 // UpsertUser creates or refreshes a user identified by (host, remote_id).
 func (s *Store) UpsertUser(ctx context.Context, u *User) (*User, error) {
 	now := time.Now().UTC()
@@ -20,9 +28,9 @@ func (s *Store) UpsertUser(ctx context.Context, u *User) (*User, error) {
 			avatar_url = excluded.avatar_url,
 			access_token = excluded.access_token,
 			last_login_at = excluded.last_login_at
-		RETURNING id, created_at`,
+		RETURNING id, created_at, timezone, default_template`,
 		u.Host, u.RemoteID, u.Acct, u.DisplayName, u.AvatarURL, u.AccessToken, now.Unix(), now.Unix(),
-	).Scan(&u.ID, &created)
+	).Scan(&u.ID, &created, &u.Timezone, &u.DefaultTemplate)
 	if err != nil {
 		return nil, err
 	}
@@ -33,21 +41,46 @@ func (s *Store) UpsertUser(ctx context.Context, u *User) (*User, error) {
 
 // UserByRemote finds a user by the identity an instance reports.
 func (s *Store) UserByRemote(ctx context.Context, host, remoteID string) (*User, error) {
-	return s.scanUser(s.db.QueryRowContext(ctx, `
-		SELECT id, host, remote_id, acct, display_name, avatar_url, access_token, created_at, last_login_at
-		FROM users WHERE host = ? AND remote_id = ?`, host, remoteID))
+	return s.scanUser(s.db.QueryRowContext(ctx,
+		userColumns+` WHERE u.host = ? AND u.remote_id = ?`, host, remoteID))
 }
 
 func (s *Store) UserByID(ctx context.Context, id int64) (*User, error) {
-	return s.scanUser(s.db.QueryRowContext(ctx, `
-		SELECT id, host, remote_id, acct, display_name, avatar_url, access_token, created_at, last_login_at
-		FROM users WHERE id = ?`, id))
+	return s.scanUser(s.db.QueryRowContext(ctx, userColumns+` WHERE u.id = ?`, id))
+}
+
+// SetUserPreferences stores the account-level settings. Both values are
+// validated by the caller; empty means "the default", not "unset".
+func (s *Store) SetUserPreferences(ctx context.Context, id int64, timezone, defaultTemplate string) error {
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE users SET timezone = ?, default_template = ? WHERE id = ?`,
+		timezone, defaultTemplate, id)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// UserTimezone reads one account's timezone without pulling its access token
+// along with it. The delivery worker needs the zone for every post and nothing
+// else from the row.
+func (s *Store) UserTimezone(ctx context.Context, id int64) (string, error) {
+	var tz string
+	err := s.db.QueryRowContext(ctx, `SELECT timezone FROM users WHERE id = ?`, id).Scan(&tz)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", ErrNotFound
+	}
+	return tz, err
 }
 
 func (s *Store) scanUser(row *sql.Row) (*User, error) {
 	var u User
 	var created, login int64
-	err := row.Scan(&u.ID, &u.Host, &u.RemoteID, &u.Acct, &u.DisplayName, &u.AvatarURL, &u.AccessToken, &created, &login)
+	err := row.Scan(&u.ID, &u.Host, &u.RemoteID, &u.Acct, &u.DisplayName, &u.AvatarURL, &u.AccessToken,
+		&u.Timezone, &u.DefaultTemplate, &created, &login)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -157,9 +190,8 @@ func (s *Store) CreateSession(ctx context.Context, id string, userID int64, ttl 
 // SessionUser returns the user for a live session, or ErrNotFound if the
 // session is unknown or expired.
 func (s *Store) SessionUser(ctx context.Context, sessionID string) (*User, error) {
-	return s.scanUser(s.db.QueryRowContext(ctx, `
-		SELECT u.id, u.host, u.remote_id, u.acct, u.display_name, u.avatar_url, u.access_token, u.created_at, u.last_login_at
-		FROM sessions s JOIN users u ON u.id = s.user_id
+	return s.scanUser(s.db.QueryRowContext(ctx,
+		userColumns+` JOIN sessions s ON s.user_id = u.id
 		WHERE s.id = ? AND s.expires_at > ?`, sessionID, time.Now().UTC().Unix()))
 }
 

@@ -22,6 +22,11 @@ type Vars struct {
 	Author    string
 	FeedTitle string
 	Published time.Time
+	// Location is the timezone {{published}} is rendered in. Nil means UTC,
+	// which is what an account that has not set one gets. It matters more than
+	// it looks: an entry published at 23:00 in Amsterdam is the next day's date
+	// in UTC, so a post would name a day the reader has not reached yet.
+	Location *time.Location
 }
 
 // Variable documents one placeholder for the UI.
@@ -121,7 +126,11 @@ func Render(tmpl string, v Vars, limit int) string {
 func (v Vars) values() map[string]string {
 	published := ""
 	if !v.Published.IsZero() {
-		published = v.Published.UTC().Format("2006-01-02")
+		loc := v.Location
+		if loc == nil {
+			loc = time.UTC
+		}
+		published = v.Published.In(loc).Format("2006-01-02")
 	}
 	return map[string]string{
 		"title":      v.Title,

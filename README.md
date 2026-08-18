@@ -1,6 +1,7 @@
 # feedrepeater
 
-Posts RSS and Atom entries to Mastodon, Bluesky, Discord, Slack, and webhooks.
+Posts RSS and Atom entries to Mastodon, Bluesky, Discord, Slack, ntfy, and
+webhooks.
 
 Sign in with a Mastodon account on any instance. Add one feed, by its own
 address or by the address of the site, whose page is read for the feed it links
@@ -97,6 +98,23 @@ than the delivery backoff, capped at an hour. Neither service offers an
 idempotency key, so a retry after a timeout that actually arrived can post
 twice; retries only happen when no 2xx was seen.
 
+**ntfy** pushes a notification to a topic, titled with the feed and opening the
+entry when tapped. The topic name is not a credential and is shown in the form;
+the optional access token is, so it is stored encrypted and never rendered back.
+The server defaults to `ntfy.sh` and can be your own, which is the interesting
+part: an address supplied by a user is the shape that makes the webhook kind an
+open relay if it is not checked. So connecting asks the address for
+`/v1/health` and requires ntfy's own answer, which means the target has to be a
+cooperating ntfy server rather than merely a URL somebody knows. That is a
+weaker proof than the webhook challenge, which echoes a fresh value, and it is
+the strongest one this protocol offers. Connecting then publishes one
+notification, because ntfy has no way to say whether a topic and token will work
+without using them — and for a notification service the notification arriving is
+the confirmation anyway. Changing the topic, server or token proves the new one
+the same way; changing the template or priority does not, so editing a word does
+not buzz a phone. Messages are published as JSON rather than through ntfy's
+header form, since a header cannot carry a title that is not ASCII.
+
 **Webhook** sends a JSON `POST` with an HMAC-SHA256 signature:
 
 ```
@@ -129,6 +147,17 @@ Substitution is a single literal pass — a value that looks like a placeholder 
 printed, not expanded. Text is trimmed to each service's limit by shortening the
 summary first, then the title. The URL is never truncated.
 
+`{{published}}` renders in the account's timezone, set in Settings. It is the
+one placeholder a zone changes, and it changes it where a reader would notice:
+an entry published at 23:00 in Amsterdam is the next day's date in UTC. An
+account that has set no zone gets UTC. The binary embeds the IANA database, so a
+name that the form accepted resolves the same way wherever it runs.
+
+Settings also holds a default post text, which is what a destination added
+afterwards starts from — typed once rather than once per service. It is copied
+onto a destination at creation rather than referenced, so changing it never
+rewrites what an existing destination posts.
+
 ## Abuse
 
 Anyone can run a Mastodon server, so anyone can mint unlimited accounts to sign
@@ -143,6 +172,12 @@ back before the destination is stored. Changing the address re-verifies. Without
 this, feedrepeater is an open relay: sign up, point a webhook at someone else's
 server, and we deliver requests there on a schedule. The SSRF guard keeps those
 requests on the public internet, which protects this network and nobody else's.
+
+The rule is about the address, not the kind, so every kind that takes one is
+covered: Discord and Slack pin the host, ntfy requires its server to answer
+ntfy's own health endpoint, and the generic webhook echoes a challenge. A new
+destination that accepts an address and does none of these is the same open
+relay under a different name.
 
 **Signup volume is watched, not capped.** There is deliberately no per-instance
 rate limit: forty accounts from a large server in an afternoon is what a post

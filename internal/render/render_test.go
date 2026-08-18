@@ -3,6 +3,7 @@ package render
 import (
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 )
 
@@ -109,5 +110,29 @@ func TestStripHTML(t *testing.T) {
 		if got := StripHTML(in); got != want {
 			t.Errorf("StripHTML(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+// The published date is the one placeholder a timezone changes, and it changes
+// it exactly where it matters: an entry published late in the evening is the
+// next day's date in UTC, so a post would name a day the reader has not reached.
+func TestPublishedRendersInTheGivenZone(t *testing.T) {
+	amsterdam, err := time.LoadLocation("Europe/Amsterdam")
+	if err != nil {
+		t.Skipf("no timezone database available: %v", err)
+	}
+	// 22:30 UTC on the 17th is 00:30 on the 18th in Amsterdam.
+	published := time.Date(2026, 8, 17, 22, 30, 0, 0, time.UTC)
+
+	if got := Render("{{published}}", Vars{Published: published, Location: amsterdam}, 0); got != "2026-08-18" {
+		t.Errorf("in Amsterdam = %q, want 2026-08-18", got)
+	}
+	// A nil location is UTC, which is what an account that has set none gets.
+	if got := Render("{{published}}", Vars{Published: published}, 0); got != "2026-08-17" {
+		t.Errorf("with no location = %q, want 2026-08-17", got)
+	}
+	// An entry with no date renders nothing rather than the epoch.
+	if got := Render("x{{published}}", Vars{Location: amsterdam}, 0); got != "x" {
+		t.Errorf("with no date = %q, want %q", got, "x")
 	}
 }

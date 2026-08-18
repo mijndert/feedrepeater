@@ -3,6 +3,7 @@ package web
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -281,11 +282,15 @@ type destinationForm struct {
 	Visibility   string
 	Handle       string
 	URL          string
+	Server       string
+	Topic        string
+	Priority     int
 	Account      string
 	Paused       bool
 	NewSecret    string
 	Variables    []render.Variable
 	Visibilities []string
+	Priorities   []destination.NtfyPriority
 	Preview      string
 	Limit        int
 }
@@ -304,13 +309,19 @@ func (s *Server) handleDestinationNew(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	form := destinationForm{
-		Kind:         kind,
-		Label:        defaultLabel(kind.Name, user),
-		Template:     kind.DefaultTemplate,
+		Kind:  kind,
+		Label: defaultLabel(kind.Name, user),
+		// The account's own default wins over the kind's, which is the whole
+		// point of setting one; a kind that wants something different still gets
+		// it when the account has expressed no preference.
+		Template:     nonEmpty(user.DefaultTemplate, kind.DefaultTemplate),
 		Account:      user.Handle(),
 		Variables:    render.Variables,
 		Visibilities: destination.Visibilities,
 		Visibility:   "public",
+		Priorities:   destination.NtfyPriorities,
+		Server:       destination.DefaultNtfyServer,
+		Priority:     destination.DefaultNtfyPriority,
 	}
 	s.render(w, r, http.StatusOK, "destination_new", page{Title: "Add destination", Data: form})
 }
@@ -342,9 +353,13 @@ func (s *Server) handleDestinationCreate(w http.ResponseWriter, r *http.Request)
 		Visibility:   r.PostFormValue("visibility"),
 		Handle:       strings.TrimSpace(r.PostFormValue("handle")),
 		URL:          strings.TrimSpace(r.PostFormValue("url")),
+		Server:       strings.TrimSpace(r.PostFormValue("server")),
+		Topic:        strings.TrimSpace(r.PostFormValue("topic")),
+		Priority:     formPriority(r),
 		Account:      user.Handle(),
 		Variables:    render.Variables,
 		Visibilities: destination.Visibilities,
+		Priorities:   destination.NtfyPriorities,
 	}
 	if form.Label == "" {
 		form.Label = defaultLabel(kind.Name, user)
@@ -375,6 +390,8 @@ func (s *Server) handleDestinationCreate(w http.ResponseWriter, r *http.Request)
 		err = s.configureDiscord(ctx, d, form.URL)
 	case destination.KindSlack:
 		err = s.configureSlack(ctx, d, form.URL)
+	case destination.KindNtfy:
+		err = s.configureNtfy(ctx, d, form.Server, form.Topic, r.PostFormValue("token"), form.Priority, true)
 	case destination.KindWebhook:
 		newSecret, err = s.configureWebhook(ctx, d, form.URL)
 	}
@@ -479,6 +496,34 @@ func (s *Server) handleDestinationUpdate(w http.ResponseWriter, r *http.Request)
 				return
 			}
 		}
+	case destination.KindNtfy:
+		// Server, topic and priority are not secrets, so the form carries them
+		// whole and they are applied as given. The token is, so an empty field
+		// means "keep the stored one" unless the box asking to drop it is ticked.
+		prev, _ := decodeConfig[destination.NtfyConfig](d.Config)
+		stored := s.storedNtfyToken(d)
+		token := strings.TrimSpace(r.PostFormValue("token"))
+		if token == "" && r.PostFormValue("clear_token") != "1" {
+			token = stored
+		}
+		server := strings.TrimSpace(r.PostFormValue("server"))
+		topic := strings.TrimSpace(r.PostFormValue("topic"))
+
+		// Where a post goes has to prove itself again when it moves; a template
+		// or priority edit does not, because verification publishes a
+		// notification and nobody wants one for changing a word. The server is
+		// compared normalised, so "ntfy.sh" and "https://ntfy.sh/" are the same
+		// address rather than a change.
+		normalised := ""
+		if u, err := destination.ParseNtfyServer(server); err == nil {
+			normalised = u.String()
+		}
+		moved := normalised != prev.Server || topic != prev.Topic || token != stored
+
+		if err := s.configureNtfy(ctx, d, server, topic, token, formPriority(r), moved); err != nil {
+			s.renderDestinationEdit(w, r, d, "", err.Error())
+			return
+		}
 	case destination.KindWebhook:
 		if u := strings.TrimSpace(r.PostFormValue("url")); u != "" {
 			cfg, _ := decodeConfig[destination.WebhookConfig](d.Config)
@@ -554,7 +599,7 @@ func (s *Server) handleDestinationTest(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 
 	item := s.sampleItem(ctx, user)
-	if _, err := s.pub.Send(ctx, d, item, "test-"+strconv.FormatInt(time.Now().UnixNano(), 36)); err != nil {
+	if _, err := s.pub.Send(ctx, d, item, user.Location(), "test-"+strconv.FormatInt(time.Now().UnixNano(), 36)); err != nil {
 		s.log.Info("test post failed", "destination", d.ID, "error", err)
 		s.renderDestinationEdit(w, r, d, "", "Test post failed: "+clip(err.Error(), 300))
 		return
@@ -596,17 +641,115 @@ func (s *Server) handleDeliveryRetry(w http.ResponseWriter, r *http.Request) {
 
 // --- settings --------------------------------------------------------------
 
+// settingsData is what the settings page renders. Timezone and DefaultTemplate
+// come from the form on a rejected submission and from the account otherwise, so
+// a bad value is shown back rather than discarded.
+type settingsData struct {
+	Timezone        string
+	Zones           []string
+	DefaultTemplate string
+	Variables       []render.Variable
+	Preview         string
+}
+
 func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
-	s.render(w, r, http.StatusOK, "settings", page{Title: "Settings"})
+	user := userFrom(r)
+	s.renderSettings(w, r, http.StatusOK, "", user.Timezone, user.DefaultTemplate)
+}
+
+// renderSettings draws the page with whatever values should appear in the form.
+func (s *Server) renderSettings(w http.ResponseWriter, r *http.Request, status int, errMsg, timezone, template string) {
+	s.render(w, r, status, "settings", page{
+		Title: "Settings",
+		Error: errMsg,
+		Data: settingsData{
+			Timezone:        timezone,
+			Zones:           commonZones,
+			DefaultTemplate: template,
+			Variables:       render.Variables,
+			// Previewed at no limit: this text is the starting point for any
+			// destination, and each one trims to its own service's length.
+			Preview: s.previewTemplate(r, template, 0),
+		},
+	})
+}
+
+// handleSettingsSave stores the account-level preferences.
+func (s *Server) handleSettingsSave(w http.ResponseWriter, r *http.Request) {
+	user := userFrom(r)
+	rawZone := strings.TrimSpace(r.PostFormValue("timezone"))
+	tmpl := strings.TrimSpace(r.PostFormValue("default_template"))
+
+	zone, err := parseTimezone(rawZone)
+	if err != nil {
+		s.renderSettings(w, r, http.StatusBadRequest, err.Error(), rawZone, tmpl)
+		return
+	}
+	// Empty is allowed here and means the built-in template, unlike a
+	// destination's own text, which has to say something.
+	if tmpl != "" {
+		if err := render.ValidateTemplate(tmpl); err != nil {
+			s.renderSettings(w, r, http.StatusBadRequest, err.Error(), rawZone, tmpl)
+			return
+		}
+	}
+
+	if err := s.store.SetUserPreferences(r.Context(), user.ID, zone, tmpl); err != nil {
+		s.log.Error("save settings", "user", user.ID, "error", err)
+		s.fail(w, r, http.StatusInternalServerError, "Something went wrong.")
+		return
+	}
+	redirect(w, r, "/settings", "settings-saved")
+}
+
+// parseTimezone validates an IANA zone name, returning what should be stored.
+//
+// Empty is stored for UTC rather than the string "UTC", so the column's default
+// and an account that cleared the field mean the same thing. LoadLocation is the
+// check because it is also what reads the value back: a name it accepts here
+// cannot fail there.
+func parseTimezone(name string) (string, error) {
+	if name == "" {
+		return "", nil
+	}
+	if len(name) > 64 {
+		return "", fmt.Errorf("that is not a timezone name")
+	}
+	// "Local" resolves to the server's own zone, which is a fact about this
+	// machine and not about the account. It would also silently change meaning
+	// if the service moved.
+	if strings.EqualFold(name, "local") {
+		return "", fmt.Errorf("name a zone such as Europe/Amsterdam rather than Local")
+	}
+	if _, err := time.LoadLocation(name); err != nil {
+		return "", fmt.Errorf("%q is not a timezone name; use one like Europe/Amsterdam or UTC", clip(name, 40))
+	}
+	return name, nil
+}
+
+// commonZones are offered as suggestions on the timezone field. The field itself
+// accepts any name in the IANA database — this list is a shortcut for the
+// common cases, not the set of permitted values.
+var commonZones = []string{
+	"UTC",
+	"Europe/Amsterdam", "Europe/Berlin", "Europe/Brussels", "Europe/Dublin",
+	"Europe/Lisbon", "Europe/London", "Europe/Madrid", "Europe/Moscow",
+	"Europe/Paris", "Europe/Rome", "Europe/Stockholm", "Europe/Warsaw",
+	"America/Argentina/Buenos_Aires", "America/Bogota", "America/Chicago",
+	"America/Denver", "America/Los_Angeles", "America/Mexico_City",
+	"America/New_York", "America/Sao_Paulo", "America/Toronto", "America/Vancouver",
+	"Africa/Cairo", "Africa/Johannesburg", "Africa/Lagos", "Africa/Nairobi",
+	"Asia/Dubai", "Asia/Hong_Kong", "Asia/Jakarta", "Asia/Jerusalem",
+	"Asia/Kolkata", "Asia/Seoul", "Asia/Shanghai", "Asia/Singapore", "Asia/Tokyo",
+	"Australia/Melbourne", "Australia/Perth", "Australia/Sydney",
+	"Pacific/Auckland", "Pacific/Honolulu",
 }
 
 func (s *Server) handleAccountDelete(w http.ResponseWriter, r *http.Request) {
 	user := userFrom(r)
 	if r.PostFormValue("confirm") != user.Acct {
-		s.render(w, r, http.StatusBadRequest, "settings", page{
-			Title: "Settings",
-			Error: "Type your username exactly to confirm.",
-		})
+		s.renderSettings(w, r, http.StatusBadRequest,
+			"Type your username exactly to confirm.", user.Timezone, user.DefaultTemplate)
 		return
 	}
 	// Hand the token back before the record of it is gone. Deleting the account
@@ -731,6 +874,17 @@ func (s *Server) sampleItem(ctx context.Context, user *store.User) destination.I
 	}
 	item.FeedTitle, item.FeedURL = f.Title, f.URL
 	return item
+}
+
+// formPriority reads the ntfy priority field, falling back to ntfy's own
+// default. An out-of-range value is corrected rather than rejected: it can only
+// come from a hand-made request, and there is nothing useful to say about it.
+func formPriority(r *http.Request) int {
+	p, err := strconv.Atoi(strings.TrimSpace(r.PostFormValue("priority")))
+	if err != nil || !destination.ValidNtfyPriority(p) {
+		return destination.DefaultNtfyPriority
+	}
+	return p
 }
 
 func defaultLabel(kind string, user *store.User) string {

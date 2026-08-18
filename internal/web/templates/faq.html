@@ -3,7 +3,7 @@
 
 <dl class="qa">
   <dt>What does feedrepeater do?</dt>
-  <dd>It watches an RSS or Atom feed and posts new entries to Mastodon, Bluesky, Discord, Slack, and webhooks.</dd>
+  <dd>It watches an RSS or Atom feed and posts new entries to Mastodon, Bluesky, Discord, Slack, ntfy, and webhooks.</dd>
 
   <dt>What address do I add?</dt>
   <dd>The feed's own address, or the site's. If the page you give links to a feed, that is the one saved.</dd>
@@ -15,7 +15,7 @@
   <dd>Every {{.Data.Interval}}, whether or not it has been publishing. The rate never slows down during the beta.</dd>
 
   <dt>How many feeds and destinations do I get?</dt>
-  <dd>One feed during the beta, and one destination per service: a Mastodon account, a Bluesky account, a Discord channel, a Slack channel, and a webhook. Untick one on the dashboard to stop publishing to it without disconnecting it.</dd>
+  <dd>One feed during the beta, and one destination per service: a Mastodon account, a Bluesky account, a Discord channel, a Slack channel, an ntfy topic, and a webhook. Untick one on the dashboard to stop publishing to it without disconnecting it.</dd>
 
   <dt>What if a feed publishes a lot at once?</dt>
   <dd>At most {{.Data.MaxItems}} entries are posted per check. The rest are recorded as seen, so a feed that renumbers its ids cannot flood your timeline.</dd>
@@ -29,11 +29,17 @@
   <dt>Why does Bluesky need an app password?</dt>
   <dd>Use an app password from your Bluesky settings, not your account password. It is stored encrypted, and you can revoke it from Bluesky at any time.</dd>
 
+  <dt>How does ntfy connect?</dt>
+  <dd>Install ntfy on your phone, subscribe to a topic, and give the topic name here. On ntfy.sh a topic is open to anyone who guesses its name, so pick one nobody would. Your own server works too: we ask it for <code>/v1/health</code> first, so an address that is not an ntfy server cannot be pointed at from here. There is no way to check a topic without using it, so connecting publishes one notification. An access token is needed only for a reserved topic or a server that asks for one, and is stored encrypted.</dd>
+
   <dt>What does a webhook receive?</dt>
   <dd>A JSON POST signed with HMAC-SHA256 under a secret shown once when you add the destination. The address has to echo back a challenge before it is saved, and again if you change it.</dd>
 
   <dt>Can I change the post text?</dt>
-  <dd>Every destination has its own template with a fixed set of placeholders: <code>{{"{{title}} {{url}} {{summary}} {{author}} {{feed_title}} {{published}}"}}</code>. Text is trimmed to each service's limit by shortening the summary first, then the title. The link is never cut.</dd>
+  <dd>Every destination has its own template with a fixed set of placeholders: <code>{{"{{title}} {{url}} {{summary}} {{author}} {{feed_title}} {{published}}"}}</code>. Text is trimmed to each service's limit by shortening the summary first, then the title. The link is never cut. Settings holds a default that new destinations start from, so wording is typed once; changing it leaves destinations you already have alone.</dd>
+
+  <dt>Which timezone are dates in?</dt>
+  <dd>UTC, until you name one in Settings. It sets the dates shown here and the day <code>{{"{{published}}"}}</code> renders, which matters at the edges of a day: an entry published at 23:00 in Amsterdam is the next day's date in UTC.</dd>
 
   <dt>What happens when something fails?</dt>
   <dd>A failed post is retried with a growing delay before it is abandoned, and one that has given up has a Retry button on your dashboard. A feed that keeps failing is still tried on the same schedule, unless its server asks for room, and is paused after about two weeks of it, with the reason on your dashboard.</dd>

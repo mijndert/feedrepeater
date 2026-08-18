@@ -49,6 +49,29 @@
     <p class="hint">The stored URL is a credential and is not shown again. A new one is checked by posting one line to its channel.</p>
   {{end}}
 
+  {{if eq $d.Kind "ntfy"}}
+    <label for="topic">Topic</label>
+    <input type="text" id="topic" name="topic" value="{{$f.Topic}}" maxlength="64"
+           autocapitalize="off" autocorrect="off" spellcheck="false" required>
+
+    <label for="server">Server</label>
+    <input type="url" id="server" name="server" value="{{$f.Server}}" autocomplete="off" spellcheck="false">
+
+    <label for="priority">Priority</label>
+    <select id="priority" name="priority">
+      {{range $f.Priorities}}<option value="{{.Value}}"{{if eq .Value $f.Priority}} selected{{end}}>{{.Label}}</option>{{end}}
+    </select>
+
+    <label for="token">Replace access token</label>
+    <input type="password" id="token" name="token" autocomplete="new-password"
+           placeholder="Leave empty to keep the current one">
+    <label class="checkbox"><input type="checkbox" name="clear_token" value="1"> Remove the stored token</label>
+    <p class="hint">
+      Changing the topic, the server or the token publishes one notification to prove the new
+      one works. Changing anything else here does not.
+    </p>
+  {{end}}
+
   {{if eq $d.Kind "webhook"}}
     <label for="url">URL</label>
     <input type="url" id="url" name="url" value="{{$f.URL}}" required>

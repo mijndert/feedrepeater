@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
+	"time"
 
 	"feedrepeater.com/internal/destination"
 	"feedrepeater.com/internal/render"
@@ -99,6 +101,71 @@ func (s *Server) configureSlack(ctx context.Context, d *store.Destination, rawUR
 	return s.setCredentials(d, destination.SlackCredentials{URL: u.String()})
 }
 
+// configureNtfy verifies the server and topic, then stores the topic in the
+// clear and the access token sealed.
+//
+// The server address is user-supplied, so it is checked before anything is
+// stored: see VerifyNtfy for why that check is the difference between this kind
+// and an open relay. The token is optional — an open topic on ntfy.sh needs
+// none — but a stored empty token is still a stored credential blob, so the
+// shape of the row does not change with it.
+//
+// verify runs that check and publishes a confirming notification. It is always
+// true when connecting and true on an edit only when the destination moved,
+// since a template change should not buzz a phone.
+func (s *Server) configureNtfy(ctx context.Context, d *store.Destination, server, topic, token string, priority int, verify bool) error {
+	u, err := destination.ParseNtfyServer(server)
+	if err != nil {
+		return err
+	}
+	if err := destination.ValidNtfyTopic(topic); err != nil {
+		return err
+	}
+	if err := s.http.ValidateURL(u); err != nil {
+		return fmt.Errorf("that server address cannot be used; enter a public https address")
+	}
+	if !destination.ValidNtfyPriority(priority) {
+		priority = destination.DefaultNtfyPriority
+	}
+	if len(token) > 300 {
+		return fmt.Errorf("that access token is too long")
+	}
+	if verify {
+		if err := destination.VerifyNtfy(ctx, s.http, u.String(), topic, token); err != nil {
+			s.log.Info("ntfy check failed", "host", u.Host, "error", err)
+			return fmt.Errorf("could not publish to that topic: %v", err)
+		}
+	}
+	if err := s.setConfig(d, destination.NtfyConfig{
+		Server: u.String(), Topic: strings.TrimSpace(topic), Priority: priority,
+	}); err != nil {
+		return err
+	}
+	return s.setCredentials(d, destination.NtfyCredentials{Token: token})
+}
+
+// storedNtfyToken reads back the access token already saved for a destination.
+//
+// This is the one place a stored destination credential is decrypted outside the
+// publisher, and it is read to be re-sealed rather than shown: an edit that
+// leaves the token field empty must keep the token it had, not quietly drop it
+// and start failing on a protected topic. An unreadable blob reads as no token,
+// which the form then reports as a topic that refused the request.
+func (s *Server) storedNtfyToken(d *store.Destination) string {
+	if len(d.Credentials) == 0 {
+		return ""
+	}
+	raw, err := s.keys.Decrypt(secret.PurposeDestination, d.Credentials)
+	if err != nil {
+		return ""
+	}
+	var creds destination.NtfyCredentials
+	if json.Unmarshal(raw, &creds) != nil {
+		return ""
+	}
+	return creds.Token
+}
+
 // configureWebhook stores the endpoint and mints a signing secret.
 func (s *Server) configureWebhook(ctx context.Context, d *store.Destination, rawURL string) (string, error) {
 	u, err := s.http.ParseURL(rawURL)
@@ -176,6 +243,7 @@ func (s *Server) renderDestinationEdit(w http.ResponseWriter, r *http.Request, d
 		NewSecret:    newSecret,
 		Variables:    render.Variables,
 		Visibilities: destination.Visibilities,
+		Priorities:   destination.NtfyPriorities,
 	}
 
 	switch d.Kind {
@@ -202,19 +270,25 @@ func (s *Server) renderDestinationEdit(w http.ResponseWriter, r *http.Request, d
 			form.Account = cfg.Team + " · " + cfg.Hook
 		}
 		form.Limit = destination.SlackLimit
+	case destination.KindNtfy:
+		cfg, _ := decodeConfig[destination.NtfyConfig](d.Config)
+		form.Server = cfg.Server
+		form.Topic = cfg.Topic
+		form.Priority = cfg.Priority
+		if !destination.ValidNtfyPriority(form.Priority) {
+			form.Priority = destination.DefaultNtfyPriority
+		}
+		// The topic is not a secret, so unlike a channel webhook it can name the
+		// destination. The token is, and is not rendered back.
+		form.Account = hostOf(cfg.Server) + "/" + cfg.Topic
+		form.Limit = destination.NtfyLimit
 	case destination.KindWebhook:
 		cfg, _ := decodeConfig[destination.WebhookConfig](d.Config)
 		form.URL = cfg.URL
 		form.Account = hostOf(cfg.URL)
 	}
 
-	form.Preview = render.Render(nonEmpty(form.Template, render.DefaultTemplate), render.Vars{
-		Title:     "An example entry",
-		URL:       "https://example.com/an-example-entry",
-		Summary:   "The first part of the entry, with any markup removed.",
-		Author:    "Example Author",
-		FeedTitle: "Example Feed",
-	}, form.Limit)
+	form.Preview = s.previewTemplate(r, form.Template, form.Limit)
 
 	status := http.StatusOK
 	if errMsg != "" {
@@ -223,9 +297,29 @@ func (s *Server) renderDestinationEdit(w http.ResponseWriter, r *http.Request, d
 	s.render(w, r, status, "destination_edit", page{Title: form.Label, Error: errMsg, Data: form})
 }
 
+// previewTemplate renders a template against a fixed example entry, so the
+// effect of an edit is visible before anything is saved. limit is the service's
+// post length, or 0 where there is none.
+//
+// The example is dated now rather than left empty, which is what makes the
+// account's timezone visible: {{published}} is the one placeholder a zone
+// changes, and it changes it exactly at the point a reader would notice.
+func (s *Server) previewTemplate(r *http.Request, tmpl string, limit int) string {
+	return render.Render(nonEmpty(tmpl, render.DefaultTemplate), render.Vars{
+		Title:     "An example entry",
+		URL:       "https://example.com/an-example-entry",
+		Summary:   "The first part of the entry, with any markup removed.",
+		Author:    "Example Author",
+		FeedTitle: "Example Feed",
+		Published: time.Now(),
+		Location:  userFrom(r).Location(),
+	}, limit)
+}
+
 func (s *Server) destinationFormError(w http.ResponseWriter, r *http.Request, tmpl string, form destinationForm, msg string) {
 	form.Variables = render.Variables
 	form.Visibilities = destination.Visibilities
+	form.Priorities = destination.NtfyPriorities
 	// For these two the URL is the credential, so a rejected form is not
 	// re-filled with it. The templates do not render it either; this is the
 	// belt to that pair of braces.

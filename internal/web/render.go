@@ -41,27 +41,28 @@ func navSection(path string) string {
 // carry a code rather than the text itself, so no page ever renders a message
 // that came from the query string.
 var notices = map[string]string{
-	"feed-saved":   "Feed saved.",
-	"feed-found":   "That page linked to a feed, which is the one saved.",
-	"feed-removed": "Feed removed.",
-	"feed-paused":  "Feed paused.",
-	"feed-resumed": "Feed resumed.",
-	"refreshing":   "Checking the feed now.",
-	"retrying":     "That post is queued to go out again.",
-	"routes-saved": "Destinations updated.",
-	"dest-added":   "Destination added.",
-	"dest-saved":   "Destination saved.",
-	"dest-removed": "Destination removed.",
-	"test-sent":    "Test post sent.",
-	"signed-out":   "Signed out.",
-	"account-gone": "Account deleted.",
+	"feed-saved":     "Feed saved.",
+	"feed-found":     "That page linked to a feed, which is the one saved.",
+	"feed-removed":   "Feed removed.",
+	"feed-paused":    "Feed paused.",
+	"feed-resumed":   "Feed resumed.",
+	"refreshing":     "Checking the feed now.",
+	"retrying":       "That post is queued to go out again.",
+	"routes-saved":   "Destinations updated.",
+	"dest-added":     "Destination added.",
+	"dest-saved":     "Destination saved.",
+	"dest-removed":   "Destination removed.",
+	"test-sent":      "Test post sent.",
+	"settings-saved": "Settings saved.",
+	"signed-out":     "Signed out.",
+	"account-gone":   "Account deleted.",
 }
 
 func (s *Server) parseTemplates() error {
 	funcs := template.FuncMap{
 		"ago":       ago,
 		"due":       due,
-		"datetime":  datetime,
+		"localtime": localtime,
 		"kindLabel": kindLabel,
 		"host":      hostOf,
 		"acct":      acct,
@@ -204,18 +205,22 @@ func short(d time.Duration) string {
 	}
 }
 
-func datetime(t any) string {
+// localtime formats an absolute time in the account's own zone, naming the zone
+// so a reader can tell which one they are looking at. An unset or unloadable
+// name is UTC, which is what store.ParseLocation decides.
+func localtime(zone string, t any) string {
+	loc := store.ParseLocation(zone)
 	switch x := t.(type) {
 	case time.Time:
 		if x.IsZero() {
 			return ""
 		}
-		return x.UTC().Format("2006-01-02 15:04 MST")
+		return x.In(loc).Format("2006-01-02 15:04 MST")
 	case *time.Time:
 		if x == nil {
 			return ""
 		}
-		return datetime(*x)
+		return localtime(zone, *x)
 	}
 	return ""
 }
@@ -230,6 +235,8 @@ func kindLabel(kind string) string {
 		return "Discord"
 	case "slack":
 		return "Slack"
+	case "ntfy":
+		return "ntfy"
 	case "webhook":
 		return "Webhook"
 	}

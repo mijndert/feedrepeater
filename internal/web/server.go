@@ -124,6 +124,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /deliveries/{id}/retry", s.requireUser(s.handleDeliveryRetry))
 
 	mux.HandleFunc("GET /settings", s.requireUser(s.handleSettings))
+	mux.HandleFunc("POST /settings", s.requireUser(s.handleSettingsSave))
 	mux.HandleFunc("POST /settings/delete", s.requireUser(s.handleAccountDelete))
 
 	return s.recoverPanic(s.securityHeaders(s.logRequests(mux)))

@@ -1,11 +1,46 @@
 {{define "content"}}
+{{$d := .Data}}
 <h1>Settings</h1>
 
 <dl class="facts">
   <dt>Account</dt><dd>{{acct .User.Handle}}</dd>
   <dt>Instance</dt><dd>{{.User.Host}}</dd>
-  <dt>Joined</dt><dd>{{datetime .User.CreatedAt}}</dd>
+  <dt>Joined</dt><dd>{{localtime .User.Timezone .User.CreatedAt}}</dd>
 </dl>
+
+<h2>Preferences</h2>
+<form method="post" action="/settings" class="stack">
+  <input type="hidden" name="csrf" value="{{.CSRF}}">
+
+  <label for="timezone">Timezone</label>
+  <input type="text" id="timezone" name="timezone" value="{{$d.Timezone}}" list="zones"
+         placeholder="UTC" maxlength="64" autocapitalize="off" autocorrect="off" spellcheck="false">
+  <datalist id="zones">
+    {{range $d.Zones}}<option value="{{.}}">{{end}}
+  </datalist>
+  <p class="hint">
+    An IANA name such as <code>Europe/Amsterdam</code>. Any name in the database works, not
+    only the suggested ones. It sets the dates on this page and the day
+    <code>{{"{{published}}"}}</code> renders, which is the day the entry appeared where you
+    are rather than in UTC. Leave it empty for UTC.
+  </p>
+
+  <label for="default_template">Default post text</label>
+  <textarea id="default_template" name="default_template" rows="4">{{$d.DefaultTemplate}}</textarea>
+  <p class="hint">Placeholders: {{range $i, $v := $d.Variables}}{{if $i}}, {{end}}<code>{{"{{"}}{{$v.Name}}{{"}}"}}</code>{{end}}</p>
+  <p class="hint">
+    What a destination you add from now on starts with, so a change of wording is made once
+    rather than once per service. Destinations you already have keep their own text; edit
+    those on their own pages. Leave it empty to start from the built-in text.
+  </p>
+
+  {{if $d.Preview}}
+  <p class="hint">Preview</p>
+  <pre class="preview">{{$d.Preview}}</pre>
+  {{end}}
+
+  <button type="submit" class="primary">Save settings</button>
+</form>
 
 <h2>Delete account</h2>
 <p>Removes your feed, destinations, history, and stored credentials. Posts already published stay where they are.</p>
