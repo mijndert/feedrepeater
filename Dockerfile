@@ -18,7 +18,7 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 # build-time download that nothing would verify.
 FROM litestream/litestream:0.5.16@sha256:f085f8bce71a5ad4ce8e28b28ea522de1d9e0d7dd0af3ea5c1bd626d0f341954 AS litestream
 
-FROM alpine:3.22
+FROM alpine:3.24
 RUN apk add --no-cache ca-certificates tzdata \
  && adduser -D -H -u 10001 feedrepeater \
  && mkdir -p /data && chown feedrepeater:feedrepeater /data
