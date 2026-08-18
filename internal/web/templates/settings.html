@@ -2,7 +2,7 @@
 <h1>Settings</h1>
 
 <dl class="facts">
-  <dt>Account</dt><dd>{{.User.Handle}}</dd>
+  <dt>Account</dt><dd>{{acct .User.Handle}}</dd>
   <dt>Instance</dt><dd>{{.User.Host}}</dd>
   <dt>Joined</dt><dd>{{datetime .User.CreatedAt}}</dd>
 </dl>

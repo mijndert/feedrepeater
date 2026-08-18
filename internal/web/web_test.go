@@ -1,7 +1,10 @@
 package web
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"html/template"
 	"io"
 	"log/slog"
 	"net/http"
@@ -129,6 +132,122 @@ func TestNextCheckIsDescribedInUnitsThatExist(t *testing.T) {
 	}
 	if got := due((*time.Time)(nil)); got != "" {
 		t.Errorf("due(nil) = %q", got)
+	}
+}
+
+// /stats is served without a session, so the thing worth testing is not the
+// arithmetic but the absence of anything identifying. A count is publishable; the
+// handle, instance, feed URL or destination label behind it is not.
+func TestStatsPublishesCountsAndNothingIdentifying(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+
+	user, _, _ := h.signIn(t, "alice")
+	f, err := h.store.SetFeed(ctx, user.ID, "https://private.example/secret-feed.xml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.Title = "Alice's Private Notes"
+	if err := h.store.RecordFetch(ctx, f); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.store.CreateDestination(ctx, &store.Destination{
+		UserID: user.ID, Kind: "discord", Label: "my-private-channel",
+		Credentials: []byte("super-secret-webhook"),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := h.do(httptest.NewRequest(http.MethodGet, "/stats", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /stats = %d, want 200", rec.Code)
+	}
+	if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
+		t.Errorf("Content-Type = %q, want application/json", ct)
+	}
+
+	body := rec.Body.String()
+	var got statsResponse
+	if err := json.Unmarshal([]byte(body), &got); err != nil {
+		t.Fatalf("response is not valid JSON: %v", err)
+	}
+
+	if got.Users != 1 {
+		t.Errorf("users = %d, want 1", got.Users)
+	}
+	if got.Feeds.Total != 1 || got.Feeds.Active != 1 || got.Feeds.Paused != 0 {
+		t.Errorf("feeds = %+v, want total 1 active 1 paused 0", got.Feeds)
+	}
+	if got.Destinations.Total != 1 || got.Destinations.ByKind["discord"] != 1 {
+		t.Errorf("destinations = %+v, want total 1 with one discord", got.Destinations)
+	}
+	// Kinds nobody configured still appear, so consumers see a stable shape.
+	if _, ok := got.Destinations.ByKind["mastodon"]; !ok {
+		t.Error("by_kind should carry every supported kind, including zeroes")
+	}
+	if !got.Service.AcceptingSignups {
+		t.Error("accepting_signups should be true with no cap configured")
+	}
+
+	for _, secret := range []string{
+		"alice", "example.social", // handle and instance
+		"private.example", "secret-feed", "Alice's Private Notes", // feed identity
+		"my-private-channel", "super-secret-webhook", // destination identity
+	} {
+		if strings.Contains(body, secret) {
+			t.Errorf("/stats leaked %q:\n%s", secret, body)
+		}
+	}
+}
+
+// A cap that has been reached has to show as closed, because that is the one
+// thing a would-be signup wants to know before trying.
+func TestStatsReportsSignupsClosedWhenFull(t *testing.T) {
+	h := newHarness(t, func(c *config.Config) { c.MaxAccounts = 1 })
+	h.signIn(t, "alice")
+
+	rec := h.do(httptest.NewRequest(http.MethodGet, "/stats", nil))
+	var got statsResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Service.AcceptingSignups {
+		t.Error("accepting_signups should be false once MaxAccounts is reached")
+	}
+	// The cap itself is not published, only whether it has been hit.
+	if strings.Contains(rec.Body.String(), "max_accounts") {
+		t.Error("/stats should not publish the raw signup cap")
+	}
+}
+
+// A Mastodon handle looks exactly like an email address, so a proxy scanning for
+// addresses rewrites the acct@host half and leaves our leading @ in place,
+// turning the handle into @[email protected] on the page. The opt-out
+// markers that prevent it are HTML comments, and html/template elides comments,
+// so they have to survive being rendered — a literal marker in a template is
+// dropped without complaint, which is the regression this catches.
+func TestAccountHandlesSurviveAnEmailAddressScanner(t *testing.T) {
+	tmpl := template.Must(template.New("t").Funcs(template.FuncMap{"acct": acct}).
+		Parse(`<dd>{{acct .}}</dd>`))
+
+	var buf bytes.Buffer
+	if err := tmpl.Execute(&buf, "@alice@mastodon.social"); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	got := buf.String()
+
+	if want := "<!--email_off-->@alice@mastodon.social<!--/email_off-->"; !strings.Contains(got, want) {
+		t.Errorf("rendered %q, want it to contain %q", got, want)
+	}
+
+	// The name reaches us from the instance, so returning HTML must not mean
+	// returning it unescaped.
+	buf.Reset()
+	if err := tmpl.Execute(&buf, `@a<script>alert(1)</script>@evil.example`); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if strings.Contains(buf.String(), "<script>") {
+		t.Errorf("handle was not escaped: %s", buf.String())
 	}
 }
 

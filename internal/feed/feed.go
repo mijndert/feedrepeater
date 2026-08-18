@@ -196,7 +196,11 @@ func Parse(body []byte, base string) (*Result, error) {
 	}
 	baseURL, _ := url.Parse(base)
 
-	res := &Result{Title: clip(strings.TrimSpace(parsed.Title), MaxTitleLen)}
+	// collapse, not just TrimSpace: the feed's own title reaches the dashboard and
+	// post text the same way entry titles do, so it needs the same strip of
+	// markup, control characters and bidi overrides. Trimming alone let a feed
+	// publish direction-reversed text under the account holder's name.
+	res := &Result{Title: clip(collapse(parsed.Title), MaxTitleLen)}
 	for i, item := range parsed.Items {
 		if i >= MaxEntries {
 			break

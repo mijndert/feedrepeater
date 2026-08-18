@@ -3,7 +3,7 @@
 {{$d := $f.Dest}}
 <p class="back"><a href="/dashboard">Back</a></p>
 <h1>{{$d.Label}}</h1>
-<p class="meta">{{kindLabel $d.Kind}} · {{$f.Account}}</p>
+<p class="meta">{{kindLabel $d.Kind}} · {{acct $f.Account}}</p>
 
 {{if $f.NewSecret}}
 <div class="callout">

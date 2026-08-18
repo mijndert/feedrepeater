@@ -1,0 +1,33 @@
+# Dockerfile does `COPY . .` into the build stage. Without this file that stage
+# receives .env, the dev database and the whole .git directory — and the image
+# workflow exports the build cache with `mode=max`, which would publish them to
+# the Actions cache even though the final image only ever copies the binary out.
+#
+# Everything the build genuinely needs is listed in the Dockerfile: go.mod,
+# go.sum, cmd/, internal/, and deploy/litestream.yml + deploy/entrypoint.sh. Do
+# not exclude those.
+
+.git
+.github
+.gitignore
+.dockerignore
+
+# Secrets and databases.
+.env
+.env.*
+deploy/.env
+*.db
+*.db-wal
+*.db-shm
+deploy/restored.db
+
+# Build output and tool state, none of which the container build reuses.
+bin/
+.task/
+coverage.out
+
+# Docs and local tooling.
+README.md
+ROADMAP.md
+Taskfile.yml
+.claude

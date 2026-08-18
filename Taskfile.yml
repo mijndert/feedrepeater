@@ -211,16 +211,25 @@ tasks:
   # --- litestream -----------------------------------------------------------
 
   litestream:status:
-    desc: Show replica snapshots for the production database
+    desc: Show replication status and available restore points
     dir: deploy
     cmds:
-      - docker compose exec feedrepeater litestream snapshots -config /etc/litestream.yml $FR_DB_PATH
+      # `snapshots` was removed in litestream 0.5. `status` reports whether
+      # replication is keeping up, `ltx` lists the files a restore can land on.
+      #
+      # FR_DB_PATH is left for the container's own shell to expand, which is why
+      # the argument is single-quoted. The dotenv block at the top of this file
+      # loads the development .env, so expanding it here would ask the
+      # production container about dev.db.
+      - docker compose exec feedrepeater litestream status -config /etc/litestream.yml
+      - docker compose exec feedrepeater sh -c 'litestream ltx -config /etc/litestream.yml "$FR_DB_PATH"'
 
   litestream:restore:
     desc: Restore the production database from its replica into deploy/restored.db
     dir: deploy
     cmds:
-      - docker compose exec feedrepeater litestream restore -config /etc/litestream.yml -o /tmp/restored.db $FR_DB_PATH
+      # Single-quoted for the same reason as litestream:status above.
+      - docker compose exec feedrepeater sh -c 'litestream restore -config /etc/litestream.yml -o /tmp/restored.db "$FR_DB_PATH"'
       - docker compose cp feedrepeater:/tmp/restored.db ./restored.db
       - echo "wrote deploy/restored.db"
 

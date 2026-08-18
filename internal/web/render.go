@@ -64,6 +64,7 @@ func (s *Server) parseTemplates() error {
 		"datetime":  datetime,
 		"kindLabel": kindLabel,
 		"host":      hostOf,
+		"acct":      acct,
 	}
 
 	s.templates = map[string]*template.Template{}
@@ -233,6 +234,25 @@ func kindLabel(kind string) string {
 		return "Webhook"
 	}
 	return kind
+}
+
+// acct renders a fully-qualified account name so a proxy in front of us leaves
+// it alone.
+//
+// A Mastodon handle is indistinguishable from an email address to anything
+// scanning for one, so Cloudflare's Email Address Obfuscation rewrites the
+// acct@host part into a decode script and the words "[email protected]". Our
+// own leading @ is not part of the match and survives, so the page ends up
+// reading @[email protected]. These markers are how Cloudflare is asked to
+// skip a span of HTML.
+//
+// The markers have to be emitted from here rather than typed into the template:
+// html/template elides comments before they reach the output, so a literal
+// <!--email_off--> in a template is silently dropped. The name is escaped for
+// the same reason any other value would be — acct and host come from the
+// instance, not from us.
+func acct(s string) template.HTML {
+	return template.HTML("<!--email_off-->" + template.HTMLEscapeString(s) + "<!--/email_off-->")
 }
 
 // hostOf shortens a URL to its host for display.

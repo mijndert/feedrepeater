@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"sync"
 	"time"
 
 	"feedrepeater.com/internal/config"
@@ -47,6 +48,13 @@ type Server struct {
 
 	loginLimit *limiter // per client address, for sign-in attempts
 	writeLimit *limiter // per user, for actions that reach third parties
+
+	startedAt time.Time
+
+	// /stats is public and its counts are recomputed at most once per statsTTL.
+	statsMu   sync.Mutex
+	statsBody []byte
+	statsAt   time.Time
 }
 
 type Deps struct {
@@ -72,6 +80,7 @@ func NewServer(d Deps) (*Server, error) {
 		log:        d.Logger,
 		loginLimit: newLimiter(10, time.Hour),
 		writeLimit: newLimiter(30, time.Hour),
+		startedAt:  time.Now(),
 	}
 	if err := s.parseTemplates(); err != nil {
 		return nil, err
@@ -88,6 +97,7 @@ func (s *Server) Handler() http.Handler {
 
 	mux.HandleFunc("GET /{$}", s.handleIndex)
 	mux.HandleFunc("GET /healthz", s.handleHealth)
+	mux.HandleFunc("GET /stats", s.handleStats)
 	mux.HandleFunc("GET /faq", s.handleFAQ)
 	mux.HandleFunc("GET /terms", s.handleTerms)
 

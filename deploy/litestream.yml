@@ -3,12 +3,29 @@
 # The replica holds the database verbatim, including the encrypted credential
 # columns. Those stay unreadable without FR_SECRET_KEY, which is why the key
 # must never be stored in the same place as the backups.
+#
+# Written against the 0.5 schema. 0.5 renamed most of what 0.3 called things and
+# ignores unknown keys without a word, so a setting that looks right and does
+# nothing is the normal failure here rather than a startup error. Every value
+# below was confirmed against the log line litestream prints for it.
+
+# A month of daily snapshots. Both halves have to be said: the interval defaults
+# to 24h already, but retention defaults to 24h too, which would keep a single
+# day of history behind a config that reads like it keeps thirty.
+snapshot:
+  interval: 24h
+  retention: 720h
+
+# How long the finest-grained files survive after being compacted upwards, and
+# so how far back a restore can land on an exact transaction rather than the
+# nearest snapshot. The 5m default only covers the gap between compactions.
+l0-retention: 24h
 
 dbs:
   - path: ${FR_DB_PATH}
-    replicas:
-      - url: ${LITESTREAM_REPLICA_URL}
-        # Keep a day of granular restore points and a month of snapshots.
-        retention: 720h
-        snapshot-interval: 24h
-        sync-interval: 10s
+    # Singular. The `replicas` list this replaced is deprecated in 0.5.
+    replica:
+      url: ${LITESTREAM_REPLICA_URL}
+      # Ten seconds of writes is the most a hard failure can cost. The default
+      # is 1s, which is more requests than this workload justifies.
+      sync-interval: 10s

@@ -23,6 +23,11 @@ services:
       FR_DB_PATH: /data/feedrepeater.db
       FR_ADDR: 0.0.0.0:8080
       FR_MIN_POLL_INTERVAL: ${FR_MIN_POLL_INTERVAL:-15m}
+      # Left unset this is zero, and the "full while in beta" refusal in auth.go
+      # guards on `> 0` — so the cap that exists in the code never applies and
+      # signup is open to anyone who finds the URL. Fifty is a starting number,
+      # not a considered one; set it to whatever you are willing to support.
+      FR_MAX_ACCOUNTS: ${FR_MAX_ACCOUNTS:-50}
       LITESTREAM_REPLICA_URL: ${LITESTREAM_REPLICA_URL:-}
       LITESTREAM_ACCESS_KEY_ID: ${LITESTREAM_ACCESS_KEY_ID:-}
       LITESTREAM_SECRET_ACCESS_KEY: ${LITESTREAM_SECRET_ACCESS_KEY:-}
@@ -33,11 +38,15 @@ services:
       - no-new-privileges:true
     cap_drop:
       - ALL
-    logging:
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "3"
+    # No logging block on purpose. Naming a driver here overrides whatever the
+    # host daemon defaults to, and Synology's default is a custom `db` driver
+    # that Container Manager's log viewer is the only reader of: pinning
+    # json-file leaves that viewer permanently empty, which is a bad trade for a
+    # box whose logs are read through a browser.
+    #
+    # Rotation is a host-wide disk concern rather than a property of this one
+    # service, so it belongs in /etc/docker/daemon.json on hosts that need it:
+    #   {"log-driver": "json-file", "log-opts": {"max-size": "10m", "max-file": "3"}}
 
 volumes:
   feedrepeater-data:

@@ -9,7 +9,7 @@
   <input type="hidden" name="kind" value="{{$f.Kind.Name}}">
 
   {{if eq $f.Kind.Name "mastodon"}}
-    <p class="facts-inline">Posts as <strong>{{$f.Account}}</strong>, using the permission granted when you signed in.</p>
+    <p class="facts-inline">Posts as <strong>{{acct $f.Account}}</strong>, using the permission granted when you signed in.</p>
     <label for="visibility">Visibility</label>
     <select id="visibility" name="visibility">
       {{range $f.Visibilities}}<option value="{{.}}"{{if eq . "public"}} selected{{end}}>{{.}}</option>{{end}}

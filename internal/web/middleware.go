@@ -96,9 +96,15 @@ func (s *Server) logRequests(next http.Handler) http.Handler {
 	})
 }
 
-// clientIP is the address used for rate limiting. Caddy sets X-Forwarded-For
-// and is the only thing that can reach this process, so the last entry it adds
-// is trustworthy; anything a client puts in the header sits before it.
+// clientIP is the address used for rate limiting. Caddy sets X-Forwarded-For and
+// is the only thing that can reach this process, so the last entry is the one to
+// trust; anything a client sent itself sits before it.
+//
+// This leans on deploy/Caddyfile setting that header from Cf-Connecting-IP and
+// refusing anything that did not arrive through Cloudflare. Forwarding Caddy's
+// own peer address instead puts every visitor behind one Cloudflare colo in a
+// single rate-limit bucket, which ten sign-in attempts are enough to empty for
+// everyone in that geography.
 func clientIP(r *http.Request) string {
 	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
 		parts := strings.Split(xff, ",")
