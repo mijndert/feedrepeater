@@ -31,6 +31,12 @@ services:
       LITESTREAM_REPLICA_URL: ${LITESTREAM_REPLICA_URL:-}
       LITESTREAM_ACCESS_KEY_ID: ${LITESTREAM_ACCESS_KEY_ID:-}
       LITESTREAM_SECRET_ACCESS_KEY: ${LITESTREAM_SECRET_ACCESS_KEY:-}
+      # The s3:// URL carries no region, and unlike the credentials there is no
+      # LITESTREAM_-prefixed spelling of this one — the binary reads AWS_REGION.
+      # Left empty, Litestream asks S3 where the bucket lives, which works but
+      # needs s3:GetBucketLocation and one extra call on every start. Setting it
+      # removes both.
+      AWS_REGION: ${AWS_REGION:-}
     read_only: true
     tmpfs:
       - /tmp:size=16m
