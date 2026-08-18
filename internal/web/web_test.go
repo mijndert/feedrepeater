@@ -903,6 +903,11 @@ func TestConnectListMarksTheKindsInUse(t *testing.T) {
 	if !strings.Contains(body, `class="item-state ok">Connected`) {
 		t.Error("the connected kind is not marked")
 	}
+	// The way to a destination's settings has to be a control, not a link
+	// hidden in the status line, or nobody finds the post template.
+	if !strings.Contains(body, `<a class="button" href="/destinations/`+strconv.FormatInt(d.ID, 10)+`">Settings</a>`) {
+		t.Error("a connected row has no Settings button")
+	}
 	if strings.Contains(body, `href="/destinations/new?kind=mastodon"`) {
 		t.Error("a connected kind still offers a connect button")
 	}

@@ -76,18 +76,20 @@
               <span class="item-name">{{.Label}}</span>
             {{end}}
             <span class="item-sub">
-              <a href="/destinations/{{.Dest.ID}}">{{.Dest.Label}}</a>
+              {{.Dest.Label}}
               {{if .Dest.Paused}}· Paused
               {{else if .Dest.LastError}}· <span class="bad">Last attempt failed</span>
               {{else if .Dest.LastOKAt}}· Posted {{ago .Dest.LastOKAt}}{{end}}
             </span>
           </span>
           <span class="item-state ok">Connected</span>
+          <a class="button" href="/destinations/{{.Dest.ID}}">Settings</a>
         {{else}}
           <span>
             <span class="item-name">{{.Label}}</span>
             <span class="item-sub">{{.Description}}</span>
           </span>
+          <span class="item-state"></span>
           <a class="button" href="/destinations/new?kind={{.Name}}">Connect</a>
         {{end}}
       </li>

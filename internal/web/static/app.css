@@ -120,10 +120,14 @@ header {
 .wordmark:hover { text-decoration: none; }
 
 /* The mark sits a touch above the type's centre, which is where the eye reads
-   it as aligned with lowercase letters rather than floating under them. */
+   it as aligned with lowercase letters rather than floating under them.
+   It carries the accent, which is the only colour on the page that is not
+   attention: the wordmark beside it stays in the text colour. Drawn in
+   currentColor, so setting it here is all it takes, in either scheme. */
 .mark {
   flex: none;
   margin-top: -1px;
+  color: var(--accent);
 }
 
 header nav {
@@ -404,17 +408,21 @@ input[type="checkbox"]:disabled {
 
 .items { list-style: none; margin: 0; padding: 0; }
 
-/* Three columns: the control, what it is, and how it is doing. Status sits
-   right so a column of states can be read without touching the names. */
+/* Four columns: the control, what it is, how it is doing, and what to press.
+   Status sits right so a column of states can be read without touching the
+   names, and the button is always last, so Connect and Settings land in the
+   same place rather than moving as rows change state. */
 .items li {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
   gap: .85rem;
   align-items: center;
   padding: .8rem 0;
   border-bottom: 1px solid var(--line);
 }
-.items li:first-child { border-top: 1px solid var(--line); }
+/* No rule above the first row: with nothing between it and the section
+   heading, a top border read as an underline on the heading. Each row's bottom
+   border still closes the list. */
 
 .item-name {
   font-size: .95rem;
@@ -561,6 +569,9 @@ code {
     grid-template-columns: auto minmax(0, 1fr);
     row-gap: .3rem;
   }
+  /* Status and the button drop under the name rather than squeezing three
+     things onto one line. */
+  .item-state:empty { display: none; }
   .item-state, .items .button { grid-column: 2; justify-self: start; }
   .events li { grid-template-columns: 1fr; gap: .2rem; }
 }
