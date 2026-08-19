@@ -72,6 +72,25 @@
     </p>
   {{end}}
 
+  {{if eq $d.Kind "linkding"}}
+    <label for="server">Address</label>
+    <input type="url" id="server" name="server" value="{{$f.Server}}" autocomplete="off" spellcheck="false" required>
+
+    <label for="tags">Tags</label>
+    <input type="text" id="tags" name="tags" value="{{$f.Tags}}"
+           autocapitalize="off" autocorrect="off" spellcheck="false">
+
+    <label class="checkbox"><input type="checkbox" name="unread" value="1"{{if $f.Unread}} checked{{end}}> Save as unread</label>
+
+    <label for="token">Replace API token</label>
+    <input type="password" id="token" name="token" autocomplete="new-password"
+           placeholder="Leave empty to keep the current one">
+    <p class="hint">
+      Changing the address or the token asks linkding to confirm the new one. Nothing is
+      bookmarked to check it, so changing anything else here is free.
+    </p>
+  {{end}}
+
   {{if eq $d.Kind "webhook"}}
     <label for="url">URL</label>
     <input type="url" id="url" name="url" value="{{$f.URL}}" required>
@@ -81,6 +100,12 @@
   <label for="template">Post text</label>
   <textarea id="template" name="template" rows="4">{{$f.Template}}</textarea>
   <p class="hint">Placeholders: {{range $i, $v := $f.Variables}}{{if $i}}, {{end}}<code>{{"{{"}}{{$v.Name}}{{"}}"}}</code>{{end}}</p>
+  {{if eq $d.Kind "linkding"}}
+    <p class="hint">
+      For a bookmark this is the description. The link and the title are sent as their own
+      fields, so <code>{{"{{"}}summary{{"}}"}}</code> on its own is often all you want here.
+    </p>
+  {{end}}
 
   {{if $f.Preview}}
   <p class="hint">Preview</p>

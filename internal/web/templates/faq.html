@@ -3,7 +3,7 @@
 
 <dl class="qa">
   <dt>What does feedrepeater do?</dt>
-  <dd>It watches an RSS or Atom feed and posts new entries to Mastodon, Bluesky, Discord, Slack, ntfy, and webhooks.</dd>
+  <dd>It watches an RSS or Atom feed and posts new entries to Mastodon, Bluesky, Discord, Slack, ntfy, linkding, and webhooks.</dd>
 
   <dt>What address do I add?</dt>
   <dd>The feed's own address, or the site's. If the page you give links to a feed, that is the one saved.</dd>
@@ -15,7 +15,7 @@
   <dd>Every {{.Data.Interval}}, whether or not it has been publishing. The rate never slows down during the beta.</dd>
 
   <dt>How many feeds and destinations do I get?</dt>
-  <dd>One feed during the beta, and one destination per service: a Mastodon account, a Bluesky account, a Discord channel, a Slack channel, an ntfy topic, and a webhook. Untick one on the dashboard to stop publishing to it without disconnecting it.</dd>
+  <dd>One feed during the beta, and one destination per service: a Mastodon account, a Bluesky account, a Discord channel, a Slack channel, an ntfy topic, a linkding, and a webhook. Untick one on the dashboard to stop publishing to it without disconnecting it.</dd>
 
   <dt>What if a feed publishes a lot at once?</dt>
   <dd>At most {{.Data.MaxItems}} entries are posted per check. The rest are recorded as seen, so a feed that renumbers its ids cannot flood your timeline.</dd>
@@ -31,6 +31,9 @@
 
   <dt>How does ntfy connect?</dt>
   <dd>Install ntfy on your phone, subscribe to a topic, and give the topic name here. On ntfy.sh a topic is open to anyone who guesses its name, so pick one nobody would. Your own server works too: we ask it for <code>/v1/health</code> first, so an address that is not an ntfy server cannot be pointed at from here. There is no way to check a topic without using it, so connecting publishes one notification. An access token is needed only for a reserved topic or a server that asks for one, and is stored encrypted.</dd>
+
+  <dt>How does linkding connect?</dt>
+  <dd>Give the address your own <a href="https://linkding.link" rel="noreferrer nofollow">linkding</a> is served from and a REST API token from its Settings, Integrations page. We read your linkding profile with that token when you save, which proves the address and the token together without creating a bookmark. The token is stored encrypted and never shown again. Each entry becomes a bookmark: its link and title are its own, the post text is the description, and you choose the tags and whether it arrives unread.</dd>
 
   <dt>What does a webhook receive?</dt>
   <dd>A JSON POST signed with HMAC-SHA256 under a secret shown once when you add the destination. The address has to echo back a challenge before it is saved, and again if you change it.</dd>

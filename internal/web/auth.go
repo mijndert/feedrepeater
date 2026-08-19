@@ -33,6 +33,9 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, http.StatusForbidden, "That request did not come from this site.")
 		return
 	}
+	// Capped here as well as in requireUser: sign-in is the one form reachable
+	// without a session, so it is the one an anonymous stranger can post to.
+	limitForm(w, r)
 	if err := r.ParseForm(); err != nil {
 		s.fail(w, r, http.StatusBadRequest, "That form could not be read.")
 		return

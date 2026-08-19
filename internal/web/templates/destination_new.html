@@ -82,6 +82,31 @@
     </p>
   {{end}}
 
+  {{if eq $f.Kind.Name "linkding"}}
+    <label for="server">Address</label>
+    <input type="url" id="server" name="server" value="{{$f.Server}}" placeholder="https://linkding.example.com"
+           autocomplete="off" spellcheck="false" required>
+    <p class="hint">
+      Where your linkding is served from, over https, and reachable from the internet —
+      an address on a private network is refused.
+    </p>
+
+    <label for="token">API token</label>
+    <input type="password" id="token" name="token" autocomplete="new-password" required>
+    <p class="hint">
+      In linkding: Settings, Integrations, REST API. Stored encrypted and not shown again.
+      When you save we ask linkding for your profile with it, which proves both the address
+      and the token without creating a bookmark.
+    </p>
+
+    <label for="tags">Tags</label>
+    <input type="text" id="tags" name="tags" value="{{$f.Tags}}" placeholder="feedrepeater news"
+           autocapitalize="off" autocorrect="off" spellcheck="false">
+    <p class="hint">Optional, separated by spaces or commas. A linkding tag name cannot contain a space.</p>
+
+    <label class="checkbox"><input type="checkbox" name="unread" value="1"{{if $f.Unread}} checked{{end}}> Save as unread</label>
+  {{end}}
+
   {{if eq $f.Kind.Name "webhook"}}
     <label for="url">URL</label>
     <input type="url" id="url" name="url" value="{{$f.URL}}" placeholder="https://example.com/hook" required>
@@ -102,6 +127,12 @@
   <label for="template">Post text</label>
   <textarea id="template" name="template" rows="4">{{$f.Template}}</textarea>
   <p class="hint">Placeholders: {{range $i, $v := $f.Variables}}{{if $i}}, {{end}}<code>{{"{{"}}{{$v.Name}}{{"}}"}}</code>{{end}}</p>
+  {{if eq $f.Kind.Name "linkding"}}
+    <p class="hint">
+      For a bookmark this is the description. The link and the title are sent as their own
+      fields, so <code>{{"{{"}}summary{{"}}"}}</code> on its own is often all you want here.
+    </p>
+  {{end}}
 
   <button type="submit" class="primary">Add destination</button>
 </form>

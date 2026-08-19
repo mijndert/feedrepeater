@@ -24,6 +24,7 @@ const (
 	KindDiscord  = "discord"
 	KindSlack    = "slack"
 	KindNtfy     = "ntfy"
+	KindLinkding = "linkding"
 	KindWebhook  = "webhook"
 )
 
@@ -103,6 +104,12 @@ var Kinds = []Kind{
 		Name:            KindNtfy,
 		Label:           "ntfy",
 		Description:     "Push a notification to a phone through an ntfy topic.",
+		DefaultTemplate: render.DefaultTemplate,
+	},
+	{
+		Name:            KindLinkding,
+		Label:           "linkding",
+		Description:     "Save each entry as a bookmark in your own linkding.",
 		DefaultTemplate: render.DefaultTemplate,
 	},
 	{

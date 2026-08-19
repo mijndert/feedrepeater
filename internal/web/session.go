@@ -127,6 +127,7 @@ func (s *Server) requireUser(next http.HandlerFunc) http.HandlerFunc {
 				s.fail(w, r, http.StatusForbidden, "That request did not come from this site.")
 				return
 			}
+			limitForm(w, r)
 			if err := r.ParseForm(); err != nil {
 				s.fail(w, r, http.StatusBadRequest, "That form could not be read.")
 				return

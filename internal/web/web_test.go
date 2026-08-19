@@ -1004,7 +1004,7 @@ func TestConnectListMarksTheKindsInUse(t *testing.T) {
 	}
 
 	body := get()
-	for _, kind := range []string{"mastodon", "bluesky", "discord", "slack", "webhook"} {
+	for _, kind := range []string{"mastodon", "bluesky", "discord", "slack", "ntfy", "linkding", "webhook"} {
 		if !strings.Contains(body, `href="/destinations/new?kind=`+kind+`"`) {
 			t.Errorf("no connect button for %s", kind)
 		}
@@ -1439,5 +1439,144 @@ func TestNtfyConnectFormOffersItsOwnFields(t *testing.T) {
 	// A feed should not decide on its own to buzz a phone at max priority.
 	if !strings.Contains(body, `<option value="3" selected>default</option>`) {
 		t.Error("the form does not start at ntfy's own default priority")
+	}
+}
+
+// linkding's own fields are an address, an API token, tags and the unread flag.
+// The address has no default, unlike ntfy's: a linkding is somebody's own server
+// and there is no hosted one to guess at.
+func TestLinkdingConnectFormOffersItsOwnFields(t *testing.T) {
+	h := newHarness(t)
+	_, cookie, _ := h.signIn(t, "alice")
+
+	req := httptest.NewRequest(http.MethodGet, "/destinations/new?kind=linkding", nil)
+	req.AddCookie(cookie)
+	rec := h.do(req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET the linkding form = %d, want 200", rec.Code)
+	}
+	body := rec.Body.String()
+	for _, want := range []string{
+		`name="server"`,
+		`type="password" id="token"`, // the API token is entered like a password
+		`name="tags"`,
+		`name="unread"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("the linkding form is missing %s", want)
+		}
+	}
+	// ntfy's default server must not leak across into a field about a different
+	// service, which is what a single shared default would do.
+	if strings.Contains(body, destination.DefaultNtfyServer) {
+		t.Error("the linkding form is pre-filled with ntfy's server")
+	}
+	// A feed arriving as a bookmark is a reading list, so it starts unread.
+	if !strings.Contains(body, `name="unread" value="1" checked`) {
+		t.Error("the form does not start with unread ticked")
+	}
+}
+
+// A linkding API token is a credential like a Bluesky app password: stored
+// sealed, never rendered back, and kept when an edit leaves the field empty.
+func TestLinkdingTokenIsKeptButNeverShown(t *testing.T) {
+	h := newHarness(t)
+	user, cookie, csrf := h.signIn(t, "alice")
+	ctx := context.Background()
+
+	const token = "tk_lINKDINGtOKENvalue"
+	d := &store.Destination{UserID: user.ID, Kind: "linkding", Label: "Bookmarks"}
+	if err := h.server.setConfig(d, destination.LinkdingConfig{
+		Server: "https://linkding.example", Tags: []string{"feeds"}, Unread: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.server.setCredentials(d, destination.LinkdingCredentials{Token: token}); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.store.CreateDestination(ctx, d); err != nil {
+		t.Fatal(err)
+	}
+	path := "/destinations/" + strconv.FormatInt(d.ID, 10)
+
+	req := httptest.NewRequest(http.MethodGet, path, nil)
+	req.AddCookie(cookie)
+	body := h.do(req).Body.String()
+	if strings.Contains(body, token) {
+		t.Error("the edit form renders the stored API token")
+	}
+	// The address and the tags are not credentials, so they are shown back and
+	// can be corrected.
+	if !strings.Contains(body, `value="https://linkding.example"`) {
+		t.Error("the address is not shown back, so it cannot be corrected")
+	}
+	if !strings.Contains(body, `value="feeds"`) {
+		t.Error("the tags are not shown back, so editing them means retyping them")
+	}
+
+	// A save that changes only the template keeps the token, and asks linkding
+	// nothing: the address it would ask is a server that does not exist here, so a
+	// verification on every save would fail this request.
+	post := postForm(path, url.Values{
+		"csrf": {csrf}, "label": {"Bookmarks"}, "template": {"{{summary}}"},
+		"server": {"https://linkding.example"}, "tags": {"feeds"}, "unread": {"1"},
+	})
+	post.AddCookie(cookie)
+	if rec := h.do(post); rec.Code != http.StatusSeeOther {
+		t.Fatalf("saving a template change = %d, want 303: %s", rec.Code, rec.Body)
+	}
+	saved, err := h.store.Destination(ctx, user.ID, d.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := h.server.storedLinkdingToken(saved); got != token {
+		t.Errorf("stored token after an unrelated edit = %q, want it unchanged", got)
+	}
+}
+
+// The front page is what tells a visitor whether the service does what they came
+// for, and it had already fallen a service behind by being a sentence someone has
+// to remember to edit. Now it is the registry, so every supported kind is named.
+func TestFrontPageNamesEverySupportedService(t *testing.T) {
+	h := newHarness(t)
+	body := h.do(httptest.NewRequest(http.MethodGet, "/", nil)).Body.String()
+
+	for _, kind := range destination.Kinds {
+		if !strings.Contains(body, kind.Label) {
+			t.Errorf("the front page does not name %s", kind.Label)
+		}
+		// Named only. What each one does belongs on the dashboard, next to the
+		// button that connects it.
+		if strings.Contains(body, kind.Description) {
+			t.Errorf("the front page explains %s as well as naming it", kind.Label)
+		}
+	}
+}
+
+// Open signup means any account can post a form, so a form body is bounded
+// before it is parsed. Without the cap net/http accepts 10 MB, and every
+// per-field length check downstream is then the only thing standing between one
+// account and the process's memory.
+func TestOversizeFormIsRefusedBeforeItIsParsed(t *testing.T) {
+	h := newHarness(t)
+	_, cookie, csrf := h.signIn(t, "alice")
+
+	big := strings.Repeat("a ", maxFormBytes) // 128 KB, twice the cap
+	post := postForm("/settings", url.Values{"csrf": {csrf}, "default_template": {big}})
+	post.AddCookie(cookie)
+	if rec := h.do(post); rec.Code != http.StatusBadRequest {
+		t.Errorf("an oversize form = %d, want 400", rec.Code)
+	}
+
+	// Sign-in is reachable without a session, so it is capped too.
+	if rec := h.do(postForm("/login", url.Values{"instance": {big}})); rec.Code != http.StatusBadRequest {
+		t.Errorf("an oversize sign-in form = %d, want 400", rec.Code)
+	}
+
+	// A form of ordinary size still goes through.
+	ok := postForm("/settings", url.Values{"csrf": {csrf}, "timezone": {"Europe/Amsterdam"}})
+	ok.AddCookie(cookie)
+	if rec := h.do(ok); rec.Code != http.StatusSeeOther {
+		t.Errorf("a normal form = %d, want 303: %s", rec.Code, rec.Body)
 	}
 }

@@ -20,7 +20,14 @@
   --muted: #626a7a;
   --line: #e6e8ee;
   --field: #ffffff;
+  /* Two accents, because the accent does two jobs that pull opposite ways:
+     --accent is drawn *on* the page, so it has to contrast with the background,
+     and --accent-fill is a block of colour with white *on it*, so it has to
+     contrast with white. One value can serve both here, where the page is light
+     and the blue is dark. In the dark scheme it cannot, which is what the pair
+     is for. */
   --accent: #2450dc;
+  --accent-fill: #2450dc;
   --ok: #1f7a55;
   --warn: #8a6620;
   --bad: #b23124;
@@ -43,7 +50,12 @@
     --muted: #949bab;
     --line: #23262e;
     --field: #171a20;
-    --accent: #8fa8ff;
+    /* Lifted off the dark background rather than glowing on it: 5.6:1 against
+       the page, where the old value sat at 8.2 and read as a light. The fill is
+       a separate, deeper blue because white sits on it — white on the link
+       colour is 2.3:1, which is a button nobody can read the label of. */
+    --accent: #6a86ee;
+    --accent-fill: #3f63d6;
     --ok: #5fbe92;
     --warn: #d3ac5c;
     --bad: #ee8878;
@@ -192,6 +204,18 @@ p:last-child { margin-bottom: 0; }
    want to be 44rem wide. */
 .narrow { max-width: 22rem; }
 
+/* ── Services, on the front page ───────────────────────────── */
+
+/* The supported services, named and nothing more: what each one does is on the
+   dashboard where it is about to be connected. The names are generated from the
+   destination registry, so this cannot fall behind the code the way a sentence
+   naming them did. */
+.services {
+  color: var(--muted);
+  font-size: .88rem;
+  max-width: 30rem;
+}
+
 /* ── Messages ──────────────────────────────────────────────── */
 
 .error, .notice {
@@ -284,12 +308,12 @@ button:hover, .button:hover {
 }
 
 button.primary {
-  background: var(--accent);
-  border-color: var(--accent);
+  background: var(--accent-fill);
+  border-color: var(--accent-fill);
   color: #fff;
   font-weight: 500;
 }
-button.primary:hover { filter: brightness(1.08); border-color: var(--accent); }
+button.primary:hover { filter: brightness(1.08); border-color: var(--accent-fill); }
 
 button.quiet {
   background: none;
@@ -380,9 +404,10 @@ input[type="checkbox"]::before {
   /* A tick as a clip path — no glyph, so it cannot pick up a font fallback. */
   clip-path: polygon(14% 47%, 0 60%, 40% 100%, 100% 22%, 86% 9%, 38% 71%);
 }
+/* The fill, not the link colour: the tick above is white and has to be seen. */
 input[type="checkbox"]:checked {
-  background: var(--accent);
-  border-color: var(--accent);
+  background: var(--accent-fill);
+  border-color: var(--accent-fill);
 }
 input[type="checkbox"]:checked::before { transform: scale(1); }
 input[type="checkbox"]:hover:not(:checked):not(:disabled) { border-color: var(--muted); }

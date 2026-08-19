@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -119,5 +120,30 @@ func TestRetryFallsBackToBackoff(t *testing.T) {
 	got := time.Until(nextAttempt(t, st, dl.UserID))
 	if want := backoff(dl.Attempts + 1); got < want-time.Minute || got > want+time.Minute {
 		t.Errorf("next attempt in %s, want about %s", got.Round(time.Second), want)
+	}
+}
+
+// Every kind the UI offers has to be one this can build a client for. A kind
+// added to the registry and not to the switch above would connect, store
+// credentials, queue entries, and then fail every delivery with "unknown
+// destination type" — which is the one failure a person cannot act on.
+func TestEveryRegisteredKindHasATarget(t *testing.T) {
+	p, _, _ := queued(t)
+	sealed, err := p.keys.Encrypt(secret.PurposeDestination, []byte(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, kind := range destination.Kinds {
+		// Empty configuration, so most kinds refuse this row: the interest is only
+		// in whether the kind is recognised at all.
+		_, err := p.Target(&store.Destination{Kind: kind.Name, Config: "{}", Credentials: sealed})
+		if err != nil && strings.Contains(err.Error(), "unknown destination type") {
+			t.Errorf("%s is offered in the UI but the publisher cannot build it", kind.Name)
+		}
+	}
+
+	if _, err := p.Target(&store.Destination{Kind: "not-a-service", Credentials: sealed}); err == nil {
+		t.Error("an unknown kind built a target")
 	}
 }

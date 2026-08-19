@@ -1,7 +1,7 @@
 # feedrepeater
 
-Posts RSS and Atom entries to Mastodon, Bluesky, Discord, Slack, ntfy, and
-webhooks.
+Posts RSS and Atom entries to Mastodon, Bluesky, Discord, Slack, ntfy, linkding,
+and webhooks.
 
 Sign in with a Mastodon account on any instance. Add one feed, by its own
 address or by the address of the site, whose page is read for the feed it links
@@ -115,6 +115,34 @@ the same way; changing the template or priority does not, so editing a word does
 not buzz a phone. Messages are published as JSON rather than through ntfy's
 header form, since a header cannot carry a title that is not ASCII.
 
+**linkding** saves each entry as a bookmark in a [linkding](https://linkding.link)
+of your own. It is the one destination that is not a message: the entry's link and
+title are their own fields, the post text becomes the bookmark's description, and
+tags and the unread flag are set per destination. New bookmarks start unread,
+because a reading list of entries nobody has seen yet should say so — linkding's
+own default is read.
+
+The address is user-supplied, like ntfy's, so it has to prove itself. linkding
+answers `/api/user/profile/` with the account's own preferences and only for a
+token it recognises, so requiring that answer proves both halves at once: the
+address is a cooperating linkding, and the token works on it. It is the quietest
+check here — Slack has to post a line and ntfy has to publish a notification,
+because neither can be asked whether a credential works without using it, while
+this reads one document and creates nothing. It is not the strongest: a document
+shape can be served by anyone willing to serve it, so as a barrier against aiming
+this service at a stranger it ranks below a pinned host or an echoed challenge and
+above ntfy's health probe. Changing the address
+or the token proves the new one the same way; changing tags, the unread flag or
+the template does not. An address that is a page inside linkding rather than the
+root it is served from is refused with the address that was meant, since that is
+what a browser's address bar gives you; a prefix from `LD_CONTEXT_PATH` is kept.
+
+The API token grants read and write over the whole bookmark collection, so it is
+stored encrypted, never rendered back, and required — there is no such thing as a
+linkding that takes bookmarks from anybody. Retries cannot duplicate: linkding
+keys a bookmark on its URL and updates the existing one, which is the guarantee
+Discord and Slack cannot give.
+
 **Webhook** sends a JSON `POST` with an HMAC-SHA256 signature:
 
 ```
@@ -175,9 +203,10 @@ requests on the public internet, which protects this network and nobody else's.
 
 The rule is about the address, not the kind, so every kind that takes one is
 covered: Discord and Slack pin the host, ntfy requires its server to answer
-ntfy's own health endpoint, and the generic webhook echoes a challenge. A new
-destination that accepts an address and does none of these is the same open
-relay under a different name.
+ntfy's own health endpoint, linkding has to return a profile document for the
+token given, and the generic webhook echoes a challenge. A new destination that
+accepts an address and does none of these is the same open relay under a
+different name.
 
 **Signup volume is watched, not capped.** There is deliberately no per-instance
 rate limit: forty accounts from a large server in an afternoon is what a post

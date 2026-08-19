@@ -146,8 +146,8 @@ func (s *Server) configureNtfy(ctx context.Context, d *store.Destination, server
 
 // storedNtfyToken reads back the access token already saved for a destination.
 //
-// This is the one place a stored destination credential is decrypted outside the
-// publisher, and it is read to be re-sealed rather than shown: an edit that
+// This is one of two places a stored destination credential is decrypted outside
+// the publisher, and it is read to be re-sealed rather than shown: an edit that
 // leaves the token field empty must keep the token it had, not quietly drop it
 // and start failing on a protected topic. An unreadable blob reads as no token,
 // which the form then reports as a topic that refused the request.
@@ -160,6 +160,66 @@ func (s *Server) storedNtfyToken(d *store.Destination) string {
 		return ""
 	}
 	var creds destination.NtfyCredentials
+	if json.Unmarshal(raw, &creds) != nil {
+		return ""
+	}
+	return creds.Token
+}
+
+// configureLinkding verifies the server and token, then stores the address, tags
+// and unread flag in the clear and the token sealed.
+//
+// The address is user-supplied, so it is checked before anything is stored: see
+// VerifyLinkding for why that check is the difference between this kind and an
+// open relay. Unlike ntfy the token is required, since there is no such thing as
+// a linkding that takes bookmarks from anybody.
+//
+// verify runs that check. It is always true when connecting, and on an edit only
+// when the address or the token changed — not because verifying is expensive, but
+// because a template edit should not fail on a home server that happens to be
+// offline.
+func (s *Server) configureLinkding(ctx context.Context, d *store.Destination, server, token, rawTags string, unread, verify bool) error {
+	u, err := destination.ParseLinkdingServer(server)
+	if err != nil {
+		return err
+	}
+	if err := s.http.ValidateURL(u); err != nil {
+		return fmt.Errorf("that address cannot be used; enter a public https address")
+	}
+	if err := destination.ValidLinkdingToken(token); err != nil {
+		return err
+	}
+	tags, err := destination.ParseLinkdingTags(rawTags)
+	if err != nil {
+		return err
+	}
+	if verify {
+		if err := destination.VerifyLinkding(ctx, s.http, u.String(), token); err != nil {
+			s.log.Info("linkding check failed", "host", u.Host, "error", err)
+			return fmt.Errorf("could not connect to that linkding: %v", err)
+		}
+	}
+	if err := s.setConfig(d, destination.LinkdingConfig{
+		Server: u.String(), Tags: tags, Unread: unread,
+	}); err != nil {
+		return err
+	}
+	return s.setCredentials(d, destination.LinkdingCredentials{Token: token})
+}
+
+// storedLinkdingToken reads back the API token already saved for a destination,
+// for the same reason storedNtfyToken does: an edit that leaves the field empty
+// keeps the token it had rather than dropping it. An unreadable blob reads as no
+// token, which the form then reports as a token linkding refused.
+func (s *Server) storedLinkdingToken(d *store.Destination) string {
+	if len(d.Credentials) == 0 {
+		return ""
+	}
+	raw, err := s.keys.Decrypt(secret.PurposeDestination, d.Credentials)
+	if err != nil {
+		return ""
+	}
+	var creds destination.LinkdingCredentials
 	if json.Unmarshal(raw, &creds) != nil {
 		return ""
 	}
@@ -282,6 +342,17 @@ func (s *Server) renderDestinationEdit(w http.ResponseWriter, r *http.Request, d
 		// destination. The token is, and is not rendered back.
 		form.Account = hostOf(cfg.Server) + "/" + cfg.Topic
 		form.Limit = destination.NtfyLimit
+	case destination.KindLinkding:
+		cfg, _ := decodeConfig[destination.LinkdingConfig](d.Config)
+		form.Server = cfg.Server
+		// Shown back in the form the way it is typed, so editing the list is
+		// editing what is stored rather than starting again.
+		form.Tags = strings.Join(cfg.Tags, ", ")
+		form.Unread = cfg.Unread
+		// The address is not a credential, so it names the destination; the token
+		// is, and is not rendered back.
+		form.Account = hostOf(cfg.Server)
+		form.Limit = destination.LinkdingLimit
 	case destination.KindWebhook:
 		cfg, _ := decodeConfig[destination.WebhookConfig](d.Config)
 		form.URL = cfg.URL

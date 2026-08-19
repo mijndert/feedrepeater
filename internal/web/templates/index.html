@@ -1,5 +1,6 @@
 {{define "content"}}
-<h1 class="narrow">Post your feed to Mastodon, Bluesky, Discord, Slack, and webhooks.</h1>
+<h1 class="narrow">Post your feed where you read.</h1>
+<p class="services">{{range $i, $k := .Data.Kinds}}{{if $i}} · {{end}}{{$k.Label}}{{end}}</p>
 <p class="narrow">Add an RSS or Atom feed. New entries go out automatically.</p>
 <p class="narrow">No ads, no tracking, no JavaScript.</p>
 

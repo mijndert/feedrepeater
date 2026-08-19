@@ -120,6 +120,23 @@ func clientIP(r *http.Request) string {
 	return host
 }
 
+// maxFormBytes bounds a form body before anything parses it.
+//
+// No form this application serves comes close: the longest field is a post
+// template, which validation stops at 2000 runes. The cap exists because the
+// alternative is net/http's own 10 MB, and a 10 MB form field is not a
+// submission — it is a way to make the server allocate. Every parser downstream
+// then works on a bounded string, which is what keeps a per-field length check
+// from being the only thing between an open signup and the process's memory.
+const maxFormBytes = 64 << 10
+
+// limitForm caps the body of a request that is about to be parsed as a form. Past
+// the cap the read fails, and the caller reports the same "that form could not be
+// read" as any other unparseable body.
+func limitForm(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxFormBytes)
+}
+
 // limiter is a fixed-window counter. It is per-process and resets on restart,
 // which is fine for what it protects against: casual hammering, not a
 // distributed attack.

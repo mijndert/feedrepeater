@@ -52,6 +52,8 @@ func (p *Publisher) Target(d *store.Destination) (destination.Target, error) {
 		return destination.NewSlack(p.http, d.Config, creds)
 	case destination.KindNtfy:
 		return destination.NewNtfy(p.http, d.Config, creds)
+	case destination.KindLinkding:
+		return destination.NewLinkding(p.http, d.Config, creds)
 	case destination.KindWebhook:
 		return destination.NewWebhook(p.http, d.Config, creds)
 	default:

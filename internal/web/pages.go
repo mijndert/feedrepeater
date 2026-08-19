@@ -285,6 +285,8 @@ type destinationForm struct {
 	Server       string
 	Topic        string
 	Priority     int
+	Tags         string
+	Unread       bool
 	Account      string
 	Paused       bool
 	NewSecret    string
@@ -320,8 +322,19 @@ func (s *Server) handleDestinationNew(w http.ResponseWriter, r *http.Request) {
 		Visibilities: destination.Visibilities,
 		Visibility:   "public",
 		Priorities:   destination.NtfyPriorities,
-		Server:       destination.DefaultNtfyServer,
 		Priority:     destination.DefaultNtfyPriority,
+	}
+	switch kind.Name {
+	case destination.KindNtfy:
+		// The hosted service is where most people's phone is subscribed. Only ntfy
+		// has a default address: a linkding is somebody's own server and nobody
+		// else's, so that field starts empty.
+		form.Server = destination.DefaultNtfyServer
+	case destination.KindLinkding:
+		// A feed arriving as a bookmark is a reading list, so it starts unread.
+		// linkding's own default is read, which for entries nobody has seen yet
+		// would be a claim rather than a state.
+		form.Unread = true
 	}
 	s.render(w, r, http.StatusOK, "destination_new", page{Title: "Add destination", Data: form})
 }
@@ -356,6 +369,8 @@ func (s *Server) handleDestinationCreate(w http.ResponseWriter, r *http.Request)
 		Server:       strings.TrimSpace(r.PostFormValue("server")),
 		Topic:        strings.TrimSpace(r.PostFormValue("topic")),
 		Priority:     formPriority(r),
+		Tags:         strings.TrimSpace(r.PostFormValue("tags")),
+		Unread:       r.PostFormValue("unread") == "1",
 		Account:      user.Handle(),
 		Variables:    render.Variables,
 		Visibilities: destination.Visibilities,
@@ -392,6 +407,8 @@ func (s *Server) handleDestinationCreate(w http.ResponseWriter, r *http.Request)
 		err = s.configureSlack(ctx, d, form.URL)
 	case destination.KindNtfy:
 		err = s.configureNtfy(ctx, d, form.Server, form.Topic, r.PostFormValue("token"), form.Priority, true)
+	case destination.KindLinkding:
+		err = s.configureLinkding(ctx, d, form.Server, r.PostFormValue("token"), form.Tags, form.Unread, true)
 	case destination.KindWebhook:
 		newSecret, err = s.configureWebhook(ctx, d, form.URL)
 	}
@@ -521,6 +538,33 @@ func (s *Server) handleDestinationUpdate(w http.ResponseWriter, r *http.Request)
 		moved := normalised != prev.Server || topic != prev.Topic || token != stored
 
 		if err := s.configureNtfy(ctx, d, server, topic, token, formPriority(r), moved); err != nil {
+			s.renderDestinationEdit(w, r, d, "", err.Error())
+			return
+		}
+	case destination.KindLinkding:
+		// The address, the tags and the unread flag are not secrets, so the form
+		// carries them whole. The token is, so an empty field means "keep the
+		// stored one" — and unlike ntfy's there is no way to remove it, because a
+		// linkding destination without a token cannot write anything.
+		prev, _ := decodeConfig[destination.LinkdingConfig](d.Config)
+		stored := s.storedLinkdingToken(d)
+		token := strings.TrimSpace(r.PostFormValue("token"))
+		if token == "" {
+			token = stored
+		}
+		server := strings.TrimSpace(r.PostFormValue("server"))
+
+		// Where a bookmark goes proves itself again when it moves. Compared
+		// normalised, so "linkding.example" and "https://linkding.example/" are the
+		// same address rather than a change.
+		normalised := ""
+		if u, err := destination.ParseLinkdingServer(server); err == nil {
+			normalised = u.String()
+		}
+		moved := normalised != prev.Server || token != stored
+
+		if err := s.configureLinkding(ctx, d, server, token,
+			strings.TrimSpace(r.PostFormValue("tags")), r.PostFormValue("unread") == "1", moved); err != nil {
 			s.renderDestinationEdit(w, r, d, "", err.Error())
 			return
 		}
@@ -805,11 +849,25 @@ func (s *Server) renderInfo(w http.ResponseWriter, r *http.Request, name, title 
 	s.render(w, r, http.StatusOK, name, p)
 }
 
+// indexData is what the front page states about the service.
+//
+// Kinds comes from the destination registry rather than from a sentence typed
+// into the template. The page that names every supported service is the one place
+// a new service is easiest to forget, and the list that sells the thing had
+// already fallen a service behind before this existed.
+type indexData struct {
+	Kinds []destination.Kind
+}
+
 // renderIndex draws the sign-in page. Sign-in fails in several ways and each
 // one lands back here, so they share an entry point rather than repeating what
 // the page needs.
 func (s *Server) renderIndex(w http.ResponseWriter, r *http.Request, status int, message string) {
-	s.render(w, r, status, "index", page{Title: "feedrepeater", Error: message})
+	s.render(w, r, status, "index", page{
+		Title: "feedrepeater",
+		Error: message,
+		Data:  indexData{Kinds: destination.Kinds},
+	})
 }
 
 // infoData collects the numbers a page states about how the service behaves.

@@ -237,6 +237,8 @@ func kindLabel(kind string) string {
 		return "Slack"
 	case "ntfy":
 		return "ntfy"
+	case "linkding":
+		return "linkding"
 	case "webhook":
 		return "Webhook"
 	}
