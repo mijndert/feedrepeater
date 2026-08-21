@@ -490,7 +490,11 @@ label.item-sub { cursor: pointer; }
   padding: .75rem 0;
   border-bottom: 1px solid var(--line);
 }
-.events li:first-child { border-top: 1px solid var(--line); }
+/* Open and close the list without a rule, the same as .items above. A top
+   border here read as an underline on the Activity heading, and the bottom one
+   on the last row drew a line across the end of the section with nothing below
+   it to be separated from. The row separators alone are enough to group them. */
+.events li:last-child { border-bottom: none; }
 
 .event-title { font-size: .95rem; overflow-wrap: anywhere; }
 .event-title a { color: inherit; }
