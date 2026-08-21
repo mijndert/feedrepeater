@@ -8,6 +8,13 @@
 # ignores unknown keys without a word, so a setting that looks right and does
 # nothing is the normal failure here rather than a startup error. Every value
 # below was confirmed against the log line litestream prints for it.
+#
+# The bill for this is requests, not bytes. The database is single-digit
+# megabytes and S3 charges $0.023/GB-month, so a month of snapshots costs a
+# fraction of a cent; PUTs are $0.005 per thousand and there is one PUT per
+# file written. Every interval below is therefore set by how many files it
+# creates per day, and the one that matters is sync-interval, because L0 is the
+# only level that writes on a fixed clock rather than on top of another level.
 
 # A month of daily snapshots. Both halves have to be said: the interval defaults
 # to 24h already, but retention defaults to 24h too, which would keep a single
@@ -19,13 +26,43 @@ snapshot:
 # How long the finest-grained files survive after being compacted upwards, and
 # so how far back a restore can land on an exact transaction rather than the
 # nearest snapshot. The 5m default only covers the gap between compactions.
+#
+# This one is storage, not requests — the expiry deletes are free — and at this
+# database's size a day of L0 files is a few megabytes. It stays generous.
 l0-retention: 24h
+
+# Compaction cadence. Left unset these default to 30s / 5m / 1h, which are sized
+# for the 1s sync-interval they ship with: an L1 pass then merges thirty L0
+# files and earns its PUT. At the sync-interval below, a 30s L1 would merge one
+# file — a PUT spent copying a file to itself. Each level here batches roughly
+# ten of the level under it, so the pyramid holds and compaction costs about a
+# hundred PUTs a day against L0's fourteen hundred.
+#
+# The count stays at three on purpose. Intervals can change freely, but dropping
+# a level would strand the files already written at that level in the bucket
+# with nothing left to compact or expire them.
+levels:
+  - interval: 15m
+  - interval: 2h
+  - interval: 12h
 
 dbs:
   - path: ${FR_DB_PATH}
     # Singular. The `replicas` list this replaced is deprecated in 0.5.
     replica:
       url: ${LITESTREAM_REPLICA_URL}
-      # Ten seconds of writes is the most a hard failure can cost. The default
-      # is 1s, which is more requests than this workload justifies.
-      sync-interval: 10s
+      # The whole cost knob. Each tick that found new pages writes exactly one
+      # L0 file holding the latest content of every page touched since the last
+      # tick, so a longer interval is fewer files *and* fewer bytes — a row
+      # rewritten twelve times in the window ships once.
+      #
+      # What it buys is the window a hard failure can lose. Not a deploy or a
+      # restart: SIGTERM flushes before exit, with 30s to keep trying. Only
+      # power loss or a panic drops the tail, and what is in the tail is at most
+      # a minute of feed state — a few items marked delivered. Losing that
+      # re-delivers them, which is a duplicate post, not lost data. Against a
+      # 15m poll cycle most minutes have nothing in them at all.
+      #
+      # 1s is the default and 10s was the previous setting here; 60s is another
+      # six times fewer requests and still inside one poll cycle.
+      sync-interval: 60s
