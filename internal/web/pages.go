@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -708,7 +709,7 @@ func (s *Server) renderSettings(w http.ResponseWriter, r *http.Request, status i
 		Error: errMsg,
 		Data: settingsData{
 			Timezone:        timezone,
-			Zones:           commonZones,
+			Zones:           zoneOptions(timezone),
 			DefaultTemplate: template,
 			Variables:       render.Variables,
 			// Previewed at no limit: this text is the starting point for any
@@ -771,9 +772,9 @@ func parseTimezone(name string) (string, error) {
 	return name, nil
 }
 
-// commonZones are offered as suggestions on the timezone field. The field itself
-// accepts any name in the IANA database — this list is a shortcut for the
-// common cases, not the set of permitted values.
+// commonZones are the zones the timezone dropdown offers. parseTimezone still
+// accepts any name in the IANA database, so this is what the form can express
+// rather than what the account may hold — see zoneOptions.
 var commonZones = []string{
 	"UTC",
 	"Europe/Amsterdam", "Europe/Berlin", "Europe/Brussels", "Europe/Dublin",
@@ -787,6 +788,22 @@ var commonZones = []string{
 	"Asia/Kolkata", "Asia/Seoul", "Asia/Shanghai", "Asia/Singapore", "Asia/Tokyo",
 	"Australia/Melbourne", "Australia/Perth", "Australia/Sydney",
 	"Pacific/Auckland", "Pacific/Honolulu",
+}
+
+// zoneOptions is the list the dropdown renders, with the account's own zone
+// guaranteed to be in it.
+//
+// The field was a text box accepting any IANA name before it was a select, so an
+// account can hold a zone this list does not carry. A select that omits it has no
+// option to mark selected, the browser falls back to the first — UTC — and the
+// next save of an unrelated preference silently moves that account's dates. So
+// the current value is carried along rather than being a value the form cannot
+// express. Empty needs no entry: it means UTC, which is the first option anyway.
+func zoneOptions(current string) []string {
+	if current == "" || slices.Contains(commonZones, current) {
+		return commonZones
+	}
+	return slices.Concat(commonZones, []string{current})
 }
 
 func (s *Server) handleAccountDelete(w http.ResponseWriter, r *http.Request) {

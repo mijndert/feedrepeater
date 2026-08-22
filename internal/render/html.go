@@ -22,7 +22,8 @@ func StripHTML(s string) string {
 	skipDepth := 0
 
 	for {
-		switch z.Next() {
+		tok := z.Next()
+		switch tok {
 		case html.ErrorToken:
 			return clean(b.String())
 
@@ -34,14 +35,25 @@ func StripHTML(s string) string {
 		case html.StartTagToken, html.SelfClosingTagToken:
 			name, _ := z.TagName()
 			tag := string(name)
-			if skipDepth > 0 {
-				if isSkipped(tag) {
+			if isSkipped(tag) {
+				// A self-closing one — <svg/>, <iframe/> — has no content and no
+				// end tag coming, so opening a skip for it opens one that nothing
+				// ever closes: every remaining token is dropped and a summary
+				// ends at the tag. Only a real start tag has anything to skip.
+				//
+				// The raw-text tags in this set (script, style, iframe,
+				// noscript) are still lossy when self-closed *inside* another
+				// skipped element: the tokenizer enters raw-text mode on the
+				// self-closed form too and hands back the rest of the document
+				// as one text token, which no skip count can unwind. Reaching
+				// that needs markup like <svg><iframe/>, and the outcome is a
+				// short summary rather than leaked markup.
+				if tok != html.SelfClosingTagToken {
 					skipDepth++
 				}
 				continue
 			}
-			if isSkipped(tag) {
-				skipDepth = 1
+			if skipDepth > 0 {
 				continue
 			}
 			if isBlock(tag) {

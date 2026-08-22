@@ -143,14 +143,29 @@ func (s *Store) AllFeedIDs(ctx context.Context) ([]FeedOwner, error) {
 }
 
 // RecordFetch stores the outcome of a poll and the next time to try.
+//
+// paused is deliberately not among the columns written. It belongs to the
+// account, not to the fetch: the worker reads a feed, spends up to a minute
+// fetching it, and writing back the value it read would revert a pause clicked
+// inside that window — the dashboard says "Feed paused" and the feed keeps
+// posting. The one case where a poll does pause a feed is the dead-feed rule,
+// which goes through PauseFeed.
 func (s *Store) RecordFetch(ctx context.Context, f *Feed) error {
 	_, err := s.db.ExecContext(ctx, `
-		UPDATE feeds SET title = ?, etag = ?, last_modified = ?, primed = ?, paused = ?,
+		UPDATE feeds SET title = ?, etag = ?, last_modified = ?, primed = ?,
 			next_fetch_at = ?, last_fetch_at = ?, changed_at = ?, last_error = ?, failures = ?
 		WHERE id = ?`,
-		f.Title, f.ETag, f.LastModified, boolInt(f.Primed), boolInt(f.Paused),
+		f.Title, f.ETag, f.LastModified, boolInt(f.Primed),
 		f.NextFetchAt.Unix(), nullTime(f.LastFetchAt), nullTime(f.ChangedAt),
 		f.LastError, f.Failures, f.ID)
+	return err
+}
+
+// PauseFeed pauses one feed by id, for the worker's dead-feed rule. The
+// dashboard's own pause is SetFeedPaused, which is scoped by owner; this one is
+// reached from the poll loop, which has no request and no session behind it.
+func (s *Store) PauseFeed(ctx context.Context, id int64) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE feeds SET paused = 1 WHERE id = ?`, id)
 	return err
 }
 

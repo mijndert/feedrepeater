@@ -136,3 +136,36 @@ func TestPublishedRendersInTheGivenZone(t *testing.T) {
 		t.Errorf("with no date = %q, want %q", got, "x")
 	}
 }
+
+// A skipped tag in self-closing form has no content and no end tag coming, so
+// it must not open a skip that nothing closes. It used to, and the rest of the
+// summary went with it.
+func TestStripHTMLSelfClosingSkipDoesNotEatTheRest(t *testing.T) {
+	for _, tag := range []string{"svg", "iframe", "object", "script", "style", "noscript", "template"} {
+		got := StripHTML("Before <" + tag + "/> after")
+		if got != "Before after" {
+			t.Errorf("<%s/> left %q, want %q", tag, got, "Before after")
+		}
+	}
+}
+
+// The paired form still drops everything between the tags, which is the whole
+// point of the skip.
+func TestStripHTMLPairedSkipStillDropsContent(t *testing.T) {
+	cases := map[string]string{
+		"<script>alert(1)</script>":      "Before after",
+		"<style>body{color:red}</style>": "Before after",
+		`<svg><path d="M0 0"/></svg>`:    "Before after",
+		// Nesting has to unwind to the outer tag rather than the first end tag,
+		// or the tail of an <svg> containing one is emitted.
+		"<svg>a<svg>b</svg>c</svg>": "Before after",
+		// A self-closing skipped tag inside a paired one closes nothing, so the
+		// skip still ends where the real end tag is.
+		"<svg>a<svg/>b</svg>": "Before after",
+	}
+	for markup, want := range cases {
+		if got := StripHTML("Before " + markup + " after"); got != want {
+			t.Errorf("%s left %q, want %q", markup, got, want)
+		}
+	}
+}

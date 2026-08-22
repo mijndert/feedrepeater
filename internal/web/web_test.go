@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -1578,5 +1579,72 @@ func TestOversizeFormIsRefusedBeforeItIsParsed(t *testing.T) {
 	ok.AddCookie(cookie)
 	if rec := h.do(ok); rec.Code != http.StatusSeeOther {
 		t.Errorf("a normal form = %d, want 303: %s", rec.Code, rec.Body)
+	}
+}
+
+// The timezone field is a dropdown, so the account's own zone has to be one of
+// the options and has to be the selected one. The field was a text box that
+// accepted any IANA name before it was a select, so an account can hold a zone
+// the common list does not carry: a select that omits it has nothing to mark
+// selected, the browser falls back to the first option, and saving any unrelated
+// preference would silently move that account's dates.
+func TestTimezoneDropdownKeepsTheAccountsOwnZone(t *testing.T) {
+	h := newHarness(t)
+	user, cookie, csrf := h.signIn(t, "alice")
+	ctx := context.Background()
+
+	// A zone that is deliberately not in commonZones.
+	const unlisted = "Indian/Kerguelen"
+	if slices.Contains(commonZones, unlisted) {
+		t.Fatalf("%s is in commonZones; pick another for this test", unlisted)
+	}
+	if err := h.store.SetUserPreferences(ctx, user.ID, unlisted, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/settings", nil)
+	req.AddCookie(cookie)
+	body := h.do(req).Body.String()
+
+	if !strings.Contains(body, `<select id="timezone" name="timezone">`) {
+		t.Error("the timezone field is not a dropdown")
+	}
+	if !strings.Contains(body, `<option value="`+unlisted+`" selected>`) {
+		t.Errorf("the account's own zone is not carried as the selected option:\n%s", body)
+	}
+	// Saving without touching the field must not move the account.
+	post := postForm("/settings", url.Values{
+		"csrf":             {csrf},
+		"timezone":         {unlisted},
+		"default_template": {""},
+	})
+	post.AddCookie(cookie)
+	if rec := h.do(post); rec.Code != http.StatusSeeOther {
+		t.Fatalf("saving settings = %d, want 303: %s", rec.Code, rec.Body)
+	}
+	saved, err := h.store.UserByID(ctx, user.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if saved.Timezone != unlisted {
+		t.Errorf("stored timezone = %q, want %q", saved.Timezone, unlisted)
+	}
+}
+
+// An account that has set no zone reads dates in UTC, and UTC is the first
+// option, so the dropdown shows the right thing without an entry of its own.
+func TestTimezoneDropdownDefaultsToUTC(t *testing.T) {
+	h := newHarness(t)
+	_, cookie, _ := h.signIn(t, "alice")
+
+	req := httptest.NewRequest(http.MethodGet, "/settings", nil)
+	req.AddCookie(cookie)
+	body := h.do(req).Body.String()
+
+	if !strings.Contains(body, `<option value="UTC">`) {
+		t.Error("UTC is not offered")
+	}
+	if strings.Contains(body, ` selected>`) {
+		t.Error("an account with no zone set should have nothing marked selected, leaving UTC first")
 	}
 }

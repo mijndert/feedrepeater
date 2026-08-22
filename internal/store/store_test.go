@@ -434,3 +434,78 @@ func TestUserByRemote(t *testing.T) {
 		t.Errorf("matched an unknown account: %v", err)
 	}
 }
+
+// A poll holds a feed for as long as the fetch takes, and pausing is a click
+// that lands in the middle of one. The value the worker read must not be
+// written back over the account's own column, or the dashboard says "Feed
+// paused" while the feed keeps posting.
+func TestRecordFetchLeavesPauseAlone(t *testing.T) {
+	st := testStore(t)
+	ctx := context.Background()
+	alice := testUser(t, st, "alice")
+	if _, err := st.SetFeed(ctx, alice.ID, "https://example.com/feed.xml"); err != nil {
+		t.Fatal(err)
+	}
+
+	// What the worker claims at the start of a poll.
+	inflight, err := st.FeedByUser(ctx, alice.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// What the account does while that fetch is in the air.
+	if err := st.SetFeedPaused(ctx, alice.ID, true); err != nil {
+		t.Fatal(err)
+	}
+
+	// The poll finishes and records its result.
+	now := time.Now().UTC()
+	inflight.Title = "Fetched"
+	inflight.LastFetchAt = &now
+	inflight.NextFetchAt = now.Add(15 * time.Minute)
+	if err := st.RecordFetch(ctx, inflight); err != nil {
+		t.Fatal(err)
+	}
+
+	after, err := st.FeedByUser(ctx, alice.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !after.Paused {
+		t.Error("the pause was reverted by a poll that started before it")
+	}
+	if after.Title != "Fetched" {
+		t.Errorf("the poll's own columns were not recorded: title = %q", after.Title)
+	}
+}
+
+// The dead-feed rule is the one case where a poll does pause a feed, so it has
+// to keep working now that RecordFetch no longer writes the column.
+func TestPauseFeedStopsAFeed(t *testing.T) {
+	st := testStore(t)
+	ctx := context.Background()
+	alice := testUser(t, st, "alice")
+	f, err := st.SetFeed(ctx, alice.ID, "https://example.com/feed.xml")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := st.PauseFeed(ctx, f.ID); err != nil {
+		t.Fatal(err)
+	}
+	after, err := st.FeedByUser(ctx, alice.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !after.Paused {
+		t.Error("PauseFeed did not pause the feed")
+	}
+
+	due, err := st.DueFeeds(ctx, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(due) != 0 {
+		t.Errorf("a paused feed is still due for polling: %d", len(due))
+	}
+}

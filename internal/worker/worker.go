@@ -235,7 +235,8 @@ func (w *Worker) recordFailure(ctx context.Context, f *store.Feed, now time.Time
 
 	// A feed that has failed for this long in a row is gone, not having a bad
 	// afternoon. Stop asking; the dashboard shows why.
-	if deadFeed(w.cfg.MinPollInterval, f.Failures) && !f.Paused {
+	dead := deadFeed(w.cfg.MinPollInterval, f.Failures) && !f.Paused
+	if dead {
 		f.Paused = true
 		f.LastError = "Paused after repeated failures. " + f.LastError
 		w.log.Warn("feed paused after repeated failures",
@@ -249,6 +250,14 @@ func (w *Worker) recordFailure(ctx context.Context, f *store.Feed, now time.Time
 	f.NextFetchAt = now.Add(withJitter(delay))
 	if err := w.store.RecordFetch(ctx, f); err != nil {
 		w.log.Error("record fetch", "feed", f.ID, "error", err)
+	}
+	// paused is not RecordFetch's column to write — see its comment — so the
+	// dead-feed rule has to say so itself. Ordered after the fetch state, since
+	// the reason it is paused is the last_error recorded above.
+	if dead {
+		if err := w.store.PauseFeed(ctx, f.ID); err != nil {
+			w.log.Error("pause dead feed", "feed", f.ID, "error", err)
+		}
 	}
 }
 

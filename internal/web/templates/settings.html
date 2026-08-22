@@ -13,11 +13,10 @@
   <input type="hidden" name="csrf" value="{{.CSRF}}">
 
   <label for="timezone">Timezone</label>
-  <input type="text" id="timezone" name="timezone" value="{{$d.Timezone}}" list="zones"
-         placeholder="UTC" maxlength="64" autocapitalize="off" autocorrect="off" spellcheck="false">
-  <datalist id="zones">
-    {{range $d.Zones}}<option value="{{.}}">{{end}}
-  </datalist>
+  <select id="timezone" name="timezone">
+    {{range $d.Zones}}<option value="{{.}}"{{if eq . $d.Timezone}} selected{{end}}>{{.}}</option>
+    {{end}}
+  </select>
 
   <label for="default_template">Default post text</label>
   <textarea id="default_template" name="default_template" rows="4">{{$d.DefaultTemplate}}</textarea>
