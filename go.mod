@@ -3,9 +3,9 @@ module feedrepeater.com
 go 1.26.6
 
 require (
-	github.com/mmcdole/gofeed v1.4.1
+	github.com/mmcdole/gofeed v1.4.2
 	golang.org/x/net v0.58.0
-	modernc.org/sqlite v1.56.0
+	modernc.org/sqlite v1.57.0
 )
 
 require (
