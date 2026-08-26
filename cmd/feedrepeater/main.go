@@ -84,6 +84,11 @@ func run() error {
 	fetcher := feed.NewFetcher(hc)
 	pub := publisher.New(st, keys, hc, md, log)
 
+	// Built before the server so its Notify can be handed over: a handler that
+	// queues something says so directly, which is what lets the delivery loop
+	// idle for minutes instead of waking every ten seconds to find nothing.
+	wrk := worker.New(cfg, st, fetcher, pub, log)
+
 	srv, err := web.NewServer(web.Deps{
 		Config:    cfg,
 		Store:     st,
@@ -93,6 +98,7 @@ func run() error {
 		Fetcher:   fetcher,
 		Publisher: pub,
 		Logger:    log,
+		Notify:    wrk.Notify,
 	})
 	if err != nil {
 		return err
@@ -105,7 +111,7 @@ func run() error {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		worker.New(cfg, st, fetcher, pub, log).Run(ctx)
+		wrk.Run(ctx)
 	}()
 
 	err = srv.Serve(ctx)

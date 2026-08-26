@@ -177,3 +177,59 @@ func TestResolveWillNotFollowALinkToABlockedAddress(t *testing.T) {
 		t.Error("discovery followed a link to a link-local address")
 	}
 }
+
+// Plenty of servers support neither ETag nor Last-Modified and answer 200 with
+// the same bytes forever. Recognising that costs one hash and saves the parse
+// and every insert behind it.
+func TestFetchSkipsParsingAnUnchangedBody(t *testing.T) {
+	const body = `<rss><channel><title>Blog</title>
+		<item><guid>g1</guid><title>One</title></item></channel></rss>`
+
+	hits := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		// Deliberately no ETag and no Last-Modified: this is the case the hash
+		// exists for, and a conditional request would otherwise never trigger.
+		w.Header().Set("Content-Type", "application/rss+xml")
+		w.Write([]byte(body))
+	}))
+	defer srv.Close()
+
+	f := devFetcher()
+	first, err := f.Fetch(context.Background(), srv.URL, "", "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Unchanged {
+		t.Fatal("first fetch reported the body as unchanged")
+	}
+	if len(first.Entries) != 1 {
+		t.Fatalf("parsed %d entries, want 1", len(first.Entries))
+	}
+	if len(first.BodyHash) == 0 {
+		t.Fatal("no body hash to carry forward")
+	}
+
+	second, err := f.Fetch(context.Background(), srv.URL, "", "", first.BodyHash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !second.Unchanged {
+		t.Error("identical body was not recognised")
+	}
+	if len(second.Entries) != 0 {
+		t.Errorf("an unchanged body was parsed anyway: %d entries", len(second.Entries))
+	}
+	if hits != 2 {
+		t.Errorf("made %d requests, want 2", hits)
+	}
+
+	// A different body must still parse.
+	changed, err := f.Fetch(context.Background(), srv.URL, "", "", []byte("stale"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if changed.Unchanged || len(changed.Entries) != 1 {
+		t.Error("a body that did not match the stored hash was skipped")
+	}
+}

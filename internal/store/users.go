@@ -19,7 +19,7 @@ const userColumns = `SELECT u.id, u.host, u.remote_id, u.acct, u.display_name, u
 func (s *Store) UpsertUser(ctx context.Context, u *User) (*User, error) {
 	now := time.Now().UTC()
 	var created int64
-	err := s.db.QueryRowContext(ctx, `
+	err := s.rw.QueryRowContext(ctx, `
 		INSERT INTO users (host, remote_id, acct, display_name, avatar_url, access_token, created_at, last_login_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT (host, remote_id) DO UPDATE SET
@@ -41,18 +41,18 @@ func (s *Store) UpsertUser(ctx context.Context, u *User) (*User, error) {
 
 // UserByRemote finds a user by the identity an instance reports.
 func (s *Store) UserByRemote(ctx context.Context, host, remoteID string) (*User, error) {
-	return s.scanUser(s.db.QueryRowContext(ctx,
+	return s.scanUser(s.ro.QueryRowContext(ctx,
 		userColumns+` WHERE u.host = ? AND u.remote_id = ?`, host, remoteID))
 }
 
 func (s *Store) UserByID(ctx context.Context, id int64) (*User, error) {
-	return s.scanUser(s.db.QueryRowContext(ctx, userColumns+` WHERE u.id = ?`, id))
+	return s.scanUser(s.ro.QueryRowContext(ctx, userColumns+` WHERE u.id = ?`, id))
 }
 
 // SetUserPreferences stores the account-level settings. Both values are
 // validated by the caller; empty means "the default", not "unset".
 func (s *Store) SetUserPreferences(ctx context.Context, id int64, timezone, defaultTemplate string) error {
-	res, err := s.db.ExecContext(ctx,
+	res, err := s.rw.ExecContext(ctx,
 		`UPDATE users SET timezone = ?, default_template = ? WHERE id = ?`,
 		timezone, defaultTemplate, id)
 	if err != nil {
@@ -69,7 +69,7 @@ func (s *Store) SetUserPreferences(ctx context.Context, id int64, timezone, defa
 // else from the row.
 func (s *Store) UserTimezone(ctx context.Context, id int64) (string, error) {
 	var tz string
-	err := s.db.QueryRowContext(ctx, `SELECT timezone FROM users WHERE id = ?`, id).Scan(&tz)
+	err := s.ro.QueryRowContext(ctx, `SELECT timezone FROM users WHERE id = ?`, id).Scan(&tz)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", ErrNotFound
 	}
@@ -93,16 +93,53 @@ func (s *Store) scanUser(row *sql.Row) (*User, error) {
 }
 
 // DeleteUser removes the account and, by cascade, everything owned by it.
+//
+// The subscription goes with the account, but the feed it pointed at does not:
+// it is shared, and somebody else may still be reading it. Collecting the ones
+// nobody is left reading has to happen here rather than being left to the
+// janitor, or a deleted account's feed goes on being fetched for up to an hour
+// with no one to deliver it to.
 func (s *Store) DeleteUser(ctx context.Context, id int64) error {
-	_, err := s.db.ExecContext(ctx, `DELETE FROM users WHERE id = ?`, id)
+	return s.tx(ctx, func(tx *sql.Tx) error {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM users WHERE id = ?`, id); err != nil {
+			return err
+		}
+		return deleteOrphanFeeds(ctx, tx)
+	})
+}
+
+// deleteOrphanFeeds removes feeds nobody subscribes to, taking their entries
+// and polling state with them.
+func deleteOrphanFeeds(ctx context.Context, tx *sql.Tx) error {
+	_, err := tx.ExecContext(ctx, `
+		DELETE FROM feeds
+		WHERE NOT EXISTS (SELECT 1 FROM subscriptions sub WHERE sub.feed_id = feeds.id)`)
 	return err
+}
+
+// DeleteOrphanFeeds is the janitor's backstop for feeds left without a
+// subscriber. Every path that drops a subscription already collects behind
+// itself; this catches whatever a crash left half-done.
+func (s *Store) DeleteOrphanFeeds(ctx context.Context) (int64, error) {
+	var n int64
+	err := s.tx(ctx, func(tx *sql.Tx) error {
+		res, err := tx.ExecContext(ctx, `
+			DELETE FROM feeds
+			WHERE NOT EXISTS (SELECT 1 FROM subscriptions sub WHERE sub.feed_id = feeds.id)`)
+		if err != nil {
+			return err
+		}
+		n, err = res.RowsAffected()
+		return err
+	})
+	return n, err
 }
 
 // CountRecentUsersByHost reports how many accounts a single instance has
 // registered since a given time.
 func (s *Store) CountRecentUsersByHost(ctx context.Context, host string, since time.Time) (int, error) {
 	var n int
-	err := s.db.QueryRowContext(ctx,
+	err := s.ro.QueryRowContext(ctx,
 		`SELECT count(*) FROM users WHERE host = ? AND created_at >= ?`, host, since.Unix()).Scan(&n)
 	return n, err
 }
@@ -110,7 +147,7 @@ func (s *Store) CountRecentUsersByHost(ctx context.Context, host string, since t
 // CountUsers reports the number of registered accounts.
 func (s *Store) CountUsers(ctx context.Context) (int, error) {
 	var n int
-	err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM users`).Scan(&n)
+	err := s.ro.QueryRowContext(ctx, `SELECT count(*) FROM users`).Scan(&n)
 	return n, err
 }
 
@@ -119,7 +156,7 @@ func (s *Store) CountUsers(ctx context.Context) (int, error) {
 func (s *Store) Instance(ctx context.Context, host string) (*Instance, error) {
 	var in Instance
 	var created int64
-	err := s.db.QueryRowContext(ctx,
+	err := s.ro.QueryRowContext(ctx,
 		`SELECT host, client_id, client_secret, redirect_uri, created_at FROM instances WHERE host = ?`, host,
 	).Scan(&in.Host, &in.ClientID, &in.ClientSecret, &in.RedirectURI, &created)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -133,7 +170,7 @@ func (s *Store) Instance(ctx context.Context, host string) (*Instance, error) {
 }
 
 func (s *Store) SaveInstance(ctx context.Context, in *Instance) error {
-	_, err := s.db.ExecContext(ctx, `
+	_, err := s.rw.ExecContext(ctx, `
 		INSERT INTO instances (host, client_id, client_secret, redirect_uri, created_at)
 		VALUES (?, ?, ?, ?, ?)
 		ON CONFLICT (host) DO UPDATE SET
@@ -151,7 +188,7 @@ func (s *Store) SaveInstance(ctx context.Context, in *Instance) error {
 // value handed to the browser.
 func (s *Store) PutOAuthState(ctx context.Context, id, host string, verifier []byte, ttl time.Duration) error {
 	now := time.Now().UTC()
-	_, err := s.db.ExecContext(ctx, `
+	_, err := s.rw.ExecContext(ctx, `
 		INSERT INTO oauth_states (id, host, code_verifier, created_at, expires_at)
 		VALUES (?, ?, ?, ?, ?)`,
 		id, host, verifier, now.Unix(), now.Add(ttl).Unix())
@@ -162,7 +199,7 @@ func (s *Store) PutOAuthState(ctx context.Context, id, host string, verifier []b
 // recorded when the flow started. A replayed callback finds nothing.
 func (s *Store) TakeOAuthState(ctx context.Context, id string) (host string, verifier []byte, err error) {
 	var expires int64
-	err = s.db.QueryRowContext(ctx,
+	err = s.rw.QueryRowContext(ctx,
 		`DELETE FROM oauth_states WHERE id = ? RETURNING host, code_verifier, expires_at`, id,
 	).Scan(&host, &verifier, &expires)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -181,7 +218,7 @@ func (s *Store) TakeOAuthState(ctx context.Context, id string) (host string, ver
 
 func (s *Store) CreateSession(ctx context.Context, id string, userID int64, ttl time.Duration) error {
 	now := time.Now().UTC()
-	_, err := s.db.ExecContext(ctx,
+	_, err := s.rw.ExecContext(ctx,
 		`INSERT INTO sessions (id, user_id, created_at, expires_at) VALUES (?, ?, ?, ?)`,
 		id, userID, now.Unix(), now.Add(ttl).Unix())
 	return err
@@ -190,22 +227,22 @@ func (s *Store) CreateSession(ctx context.Context, id string, userID int64, ttl 
 // SessionUser returns the user for a live session, or ErrNotFound if the
 // session is unknown or expired.
 func (s *Store) SessionUser(ctx context.Context, sessionID string) (*User, error) {
-	return s.scanUser(s.db.QueryRowContext(ctx,
+	return s.scanUser(s.ro.QueryRowContext(ctx,
 		userColumns+` JOIN sessions s ON s.user_id = u.id
 		WHERE s.id = ? AND s.expires_at > ?`, sessionID, time.Now().UTC().Unix()))
 }
 
 func (s *Store) DeleteSession(ctx context.Context, sessionID string) error {
-	_, err := s.db.ExecContext(ctx, `DELETE FROM sessions WHERE id = ?`, sessionID)
+	_, err := s.rw.ExecContext(ctx, `DELETE FROM sessions WHERE id = ?`, sessionID)
 	return err
 }
 
 // DeleteExpired clears rows that have outlived their usefulness.
 func (s *Store) DeleteExpired(ctx context.Context) error {
 	now := time.Now().UTC().Unix()
-	if _, err := s.db.ExecContext(ctx, `DELETE FROM sessions WHERE expires_at < ?`, now); err != nil {
+	if _, err := s.rw.ExecContext(ctx, `DELETE FROM sessions WHERE expires_at < ?`, now); err != nil {
 		return err
 	}
-	_, err := s.db.ExecContext(ctx, `DELETE FROM oauth_states WHERE expires_at < ?`, now)
+	_, err := s.rw.ExecContext(ctx, `DELETE FROM oauth_states WHERE expires_at < ?`, now)
 	return err
 }

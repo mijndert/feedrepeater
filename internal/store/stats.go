@@ -13,7 +13,11 @@ type Stats struct {
 
 	Feeds       int
 	FeedsActive int
-	Items       int
+	// Subscriptions is how many account-to-feed links exist. Held against
+	// Feeds it is the whole argument for sharing them: the gap between the two
+	// is fetches that are no longer made.
+	Subscriptions int
+	Items         int
 
 	Destinations int
 	// DestinationsByKind is keyed by the kind column, e.g. "mastodon". Kinds
@@ -28,16 +32,20 @@ type Stats struct {
 
 // Stats collects the counts in two queries.
 //
-// The scalar subqueries are one round trip on purpose. The pool holds a single
-// connection (see Open), so ten separate count queries would serialise behind
-// each other and behind every other request in flight.
+// The scalar subqueries are one round trip on purpose, and both run on a reader
+// connection. Every field is a count(*), which SQLite answers by walking the
+// table, so this is the most expensive read the service performs and the one
+// most worth keeping off the writer. Keeping it off a request's critical path
+// is the caller's job: see web.Server.stats, which serves the previous answer
+// and recomputes behind it, and admits one computation at a time.
 func (s *Store) Stats(ctx context.Context) (*Stats, error) {
 	var st Stats
-	err := s.db.QueryRowContext(ctx, `
+	err := s.ro.QueryRowContext(ctx, `
 		SELECT (SELECT count(*) FROM users),
 		       (SELECT count(*) FROM instances),
 		       (SELECT count(*) FROM feeds),
-		       (SELECT count(*) FROM feeds WHERE paused = 0),
+		       (SELECT count(*) FROM feed_state WHERE disabled = 0),
+		       (SELECT count(*) FROM subscriptions),
 		       (SELECT count(*) FROM items),
 		       (SELECT count(*) FROM destinations),
 		       (SELECT count(*) FROM deliveries),
@@ -46,7 +54,7 @@ func (s *Store) Stats(ctx context.Context) (*Stats, error) {
 		       (SELECT count(*) FROM deliveries WHERE status = 'failed')`,
 	).Scan(
 		&st.Users, &st.Instances,
-		&st.Feeds, &st.FeedsActive, &st.Items,
+		&st.Feeds, &st.FeedsActive, &st.Subscriptions, &st.Items,
 		&st.Destinations,
 		&st.Deliveries, &st.DeliveriesSent, &st.DeliveriesPending, &st.DeliveriesFailed,
 	)
@@ -54,7 +62,7 @@ func (s *Store) Stats(ctx context.Context) (*Stats, error) {
 		return nil, err
 	}
 
-	rows, err := s.db.QueryContext(ctx,
+	rows, err := s.ro.QueryContext(ctx,
 		`SELECT kind, count(*) FROM destinations GROUP BY kind`)
 	if err != nil {
 		return nil, err

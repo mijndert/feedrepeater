@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"html/template"
 	"io"
 	"log/slog"
@@ -144,12 +145,11 @@ func TestStatsPublishesCountsAndNothingIdentifying(t *testing.T) {
 	ctx := context.Background()
 
 	user, _, _ := h.signIn(t, "alice")
-	f, err := h.store.SetFeed(ctx, user.ID, "https://private.example/secret-feed.xml")
+	f, _, err := h.store.Subscribe(ctx, user.ID, "https://private.example/secret-feed.xml", "", nil, store.FetchState{NextFetchAt: time.Now().UTC()})
 	if err != nil {
 		t.Fatal(err)
 	}
-	f.Title = "Alice's Private Notes"
-	if err := h.store.RecordFetch(ctx, f); err != nil {
+	if err := h.store.SetFeedTitle(ctx, f.ID, "Alice's Private Notes"); err != nil {
 		t.Fatal(err)
 	}
 	if err := h.store.CreateDestination(ctx, &store.Destination{
@@ -176,7 +176,7 @@ func TestStatsPublishesCountsAndNothingIdentifying(t *testing.T) {
 	if got.Users != 1 {
 		t.Errorf("users = %d, want 1", got.Users)
 	}
-	if got.Feeds.Total != 1 || got.Feeds.Active != 1 || got.Feeds.Paused != 0 {
+	if got.Feeds.Total != 1 || got.Feeds.Active != 1 || got.Feeds.Stopped != 0 {
 		t.Errorf("feeds = %+v, want total 1 active 1 paused 0", got.Feeds)
 	}
 	if got.Destinations.Total != 1 || got.Destinations.ByKind["discord"] != 1 {
@@ -561,7 +561,7 @@ func TestAddingAFeedDoesNotPostItsBacklog(t *testing.T) {
 	}
 
 	// The backlog is recorded, so a later poll sees it as already seen.
-	res, err := feed.Ingest(ctx, h.store, f.ID, user.ID, []feed.Entry{
+	res, err := feed.Ingest(ctx, h.store, f.ID, []feed.Entry{
 		{GUID: "g1", Title: "Old one"}, {GUID: "g2", Title: "Old two"}, {GUID: "g3", Title: "Old three"},
 	}, false, 5)
 	if err != nil {
@@ -577,7 +577,7 @@ func TestFeedRoutingThroughTheHandler(t *testing.T) {
 	user, cookie, csrf := h.signIn(t, "alice")
 	ctx := context.Background()
 
-	f, err := h.store.SetFeed(ctx, user.ID, "https://example.com/feed.xml")
+	f, _, err := h.store.Subscribe(ctx, user.ID, "https://example.com/feed.xml", "", nil, store.FetchState{NextFetchAt: time.Now().UTC()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -630,7 +630,7 @@ func TestFeedRoutingRejectsAnotherAccountsDestination(t *testing.T) {
 	if err := h.store.CreateDestination(ctx, victim); err != nil {
 		t.Fatal(err)
 	}
-	f, err := h.store.SetFeed(ctx, mallory.ID, "https://example.com/mallory.xml")
+	f, _, err := h.store.Subscribe(ctx, mallory.ID, "https://example.com/mallory.xml", "", nil, store.FetchState{NextFetchAt: time.Now().UTC()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -822,7 +822,7 @@ func TestFailedDeliveryCanBeRetriedByItsOwnerOnly(t *testing.T) {
 	_, mallorysCookie, mallorysCSRF := h.signIn(t, "mallory")
 	ctx := context.Background()
 
-	f, err := h.store.SetFeed(ctx, alice.ID, "https://example.com/feed.xml")
+	f, _, err := h.store.Subscribe(ctx, alice.ID, "https://example.com/feed.xml", "", nil, store.FetchState{NextFetchAt: time.Now().UTC()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -834,7 +834,7 @@ func TestFailedDeliveryCanBeRetriedByItsOwnerOnly(t *testing.T) {
 	if _, err := h.store.InsertItem(ctx, item); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := h.store.QueueDeliveries(ctx, alice.ID, f.ID, item.ID); err != nil {
+	if _, err := h.store.QueueDeliveries(ctx, f.ID, item.ID); err != nil {
 		t.Fatal(err)
 	}
 	views, err := h.store.RecentDeliveries(ctx, alice.ID, 1)
@@ -1043,12 +1043,8 @@ func TestDashboardEmitsStyleHooks(t *testing.T) {
 	user, cookie, _ := h.signIn(t, "alice")
 	ctx := context.Background()
 
-	f, err := h.store.SetFeed(ctx, user.ID, "https://example.com/feed.xml")
+	f, _, err := h.store.Subscribe(ctx, user.ID, "https://example.com/feed.xml", "", nil, store.FetchState{NextFetchAt: time.Now().UTC()})
 	if err != nil {
-		t.Fatal(err)
-	}
-	f.Primed = true
-	if err := h.store.RecordFetch(ctx, f); err != nil {
 		t.Fatal(err)
 	}
 	d := &store.Destination{UserID: user.ID, Kind: "mastodon", Label: "@alice@example.social"}
@@ -1059,7 +1055,7 @@ func TestDashboardEmitsStyleHooks(t *testing.T) {
 	if _, err := h.store.InsertItem(ctx, item); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := h.store.QueueDeliveries(ctx, user.ID, f.ID, item.ID); err != nil {
+	if _, err := h.store.QueueDeliveries(ctx, f.ID, item.ID); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1094,7 +1090,7 @@ func TestDestinationRowSeparatesLinkFromLabel(t *testing.T) {
 	user, cookie, _ := h.signIn(t, "alice")
 	ctx := context.Background()
 
-	if _, err := h.store.SetFeed(ctx, user.ID, "https://example.com/feed.xml"); err != nil {
+	if _, _, err := h.store.Subscribe(ctx, user.ID, "https://example.com/feed.xml", "", nil, store.FetchState{NextFetchAt: time.Now().UTC()}); err != nil {
 		t.Fatal(err)
 	}
 	d := &store.Destination{UserID: user.ID, Kind: "webhook", Label: "Site hook"}
@@ -1646,5 +1642,60 @@ func TestTimezoneDropdownDefaultsToUTC(t *testing.T) {
 	}
 	if strings.Contains(body, ` selected>`) {
 		t.Error("an account with no zone set should have nothing marked selected, leaving UTC first")
+	}
+}
+
+// At its ceiling the limiter must refuse rather than make room by deleting a
+// live window — deleting one resets its count, which hands the evicted key a
+// fresh allowance exactly when the limiter is under the most pressure.
+func TestLimiterCeilingRefusesRatherThanForgetting(t *testing.T) {
+	l := newLimiter(2, time.Hour)
+
+	// Fill it with live windows.
+	for i := range maxLimiterKeys {
+		if !l.allow(fmt.Sprintf("k%d", i)) {
+			t.Fatalf("key %d refused while filling", i)
+		}
+	}
+
+	// A brand-new key finds no room and is refused, rather than displacing one.
+	if l.allow("newcomer") {
+		t.Error("limiter admitted a new key past its ceiling")
+	}
+	if len(l.seen) > maxLimiterKeys {
+		t.Errorf("map grew past the ceiling to %d", len(l.seen))
+	}
+
+	// Keys already being tracked keep being counted correctly — refusing the
+	// newcomer must not have disturbed anyone's window.
+	if !l.allow("k0") {
+		t.Error("second request for a tracked key was refused")
+	}
+	if l.allow("k0") {
+		t.Error("a tracked key exceeded its limit without being refused")
+	}
+}
+
+// Once entries expire the ceiling clears itself, so a burst does not wedge the
+// limiter shut for the rest of the process's life.
+func TestLimiterCeilingRecoversAsWindowsExpire(t *testing.T) {
+	l := newLimiter(2, time.Hour)
+	for i := range maxLimiterKeys {
+		l.allow(fmt.Sprintf("k%d", i))
+	}
+	if l.allow("newcomer") {
+		t.Fatal("precondition: expected the limiter to be full")
+	}
+
+	// Age everything out.
+	past := time.Now().Add(-time.Minute)
+	for _, w := range l.seen {
+		w.until = past
+	}
+	if !l.allow("newcomer") {
+		t.Error("limiter stayed shut after its windows expired")
+	}
+	if len(l.seen) >= maxLimiterKeys {
+		t.Errorf("expired entries were not swept: %d remain", len(l.seen))
 	}
 }

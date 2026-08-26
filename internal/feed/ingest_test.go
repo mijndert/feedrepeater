@@ -4,6 +4,7 @@ import (
 	"context"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"feedrepeater.com/internal/store"
 )
@@ -23,7 +24,7 @@ func newStore(t *testing.T) (*store.Store, int64, int64) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	f, err := st.SetFeed(ctx, user.ID, "https://example.com/feed.xml")
+	f, _, err := st.Subscribe(ctx, user.ID, "https://example.com/feed.xml", "", nil, store.FetchState{NextFetchAt: time.Now().UTC()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -50,7 +51,7 @@ func TestPrimingDeliversNothing(t *testing.T) {
 	st, feedID, userID := newStore(t)
 	ctx := context.Background()
 
-	res, err := Ingest(ctx, st, feedID, userID, entries(20), true, 5)
+	res, err := Ingest(ctx, st, feedID, entries(20), true, 5)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -71,13 +72,13 @@ func TestEntriesAfterPrimingAreDelivered(t *testing.T) {
 	st, feedID, userID := newStore(t)
 	ctx := context.Background()
 
-	if _, err := Ingest(ctx, st, feedID, userID, entries(20), true, 5); err != nil {
+	if _, err := Ingest(ctx, st, feedID, entries(20), true, 5); err != nil {
 		t.Fatal(err)
 	}
 
 	// The same 20 entries plus one new one, as a later poll would see them.
 	later := append(entries(20), Entry{GUID: "new-1", Title: "Fresh", URL: "https://example.com/new"})
-	res, err := Ingest(ctx, st, feedID, userID, later, false, 5)
+	res, err := Ingest(ctx, st, feedID, later, false, 5)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -93,13 +94,13 @@ func TestEntriesAfterPrimingAreDelivered(t *testing.T) {
 }
 
 func TestBurstIsCapped(t *testing.T) {
-	st, feedID, userID := newStore(t)
+	st, feedID, _ := newStore(t)
 	ctx := context.Background()
 
-	if _, err := Ingest(ctx, st, feedID, userID, nil, true, 5); err != nil {
+	if _, err := Ingest(ctx, st, feedID, nil, true, 5); err != nil {
 		t.Fatal(err)
 	}
-	res, err := Ingest(ctx, st, feedID, userID, entries(20), false, 5)
+	res, err := Ingest(ctx, st, feedID, entries(20), false, 5)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -111,7 +112,7 @@ func TestBurstIsCapped(t *testing.T) {
 	}
 	// The skipped entries must still be recorded, or the next poll would treat
 	// them as new and deliver them after all.
-	again, err := Ingest(ctx, st, feedID, userID, entries(20), false, 5)
+	again, err := Ingest(ctx, st, feedID, entries(20), false, 5)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -124,13 +125,13 @@ func TestReIngestIsIdempotent(t *testing.T) {
 	st, feedID, userID := newStore(t)
 	ctx := context.Background()
 
-	if _, err := Ingest(ctx, st, feedID, userID, nil, true, 5); err != nil {
+	if _, err := Ingest(ctx, st, feedID, nil, true, 5); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Ingest(ctx, st, feedID, userID, entries(3), false, 5); err != nil {
+	if _, err := Ingest(ctx, st, feedID, entries(3), false, 5); err != nil {
 		t.Fatal(err)
 	}
-	res, err := Ingest(ctx, st, feedID, userID, entries(3), false, 5)
+	res, err := Ingest(ctx, st, feedID, entries(3), false, 5)
 	if err != nil {
 		t.Fatal(err)
 	}

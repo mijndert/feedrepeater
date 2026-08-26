@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"feedrepeater.com/internal/store"
@@ -60,6 +61,7 @@ var notices = map[string]string{
 
 func (s *Server) parseTemplates() error {
 	funcs := template.FuncMap{
+		"asset":     s.assets.path,
 		"ago":       ago,
 		"due":       due,
 		"localtime": localtime,
@@ -79,6 +81,16 @@ func (s *Server) parseTemplates() error {
 	}
 	return nil
 }
+
+// renderBufs reuses the scratch buffers pages are built in. A page is a few
+// kilobytes and every request allocated one, grew it a handful of times as the
+// template ran, and handed the whole thing to the collector.
+var renderBufs = sync.Pool{New: func() any { return new(bytes.Buffer) }}
+
+// maxPooledBuf is the largest buffer worth keeping. One page is not going to be
+// megabytes, and holding a grown outlier forever would trade an allocation for
+// a permanent leak of the largest response ever rendered.
+const maxPooledBuf = 128 << 10
 
 // render writes a page. It renders into a buffer first so a template failure
 // produces an error page rather than half a document with a 200 on it.
@@ -108,8 +120,15 @@ func (s *Server) render(w http.ResponseWriter, r *http.Request, status int, name
 		w.Header().Set("Content-Security-Policy", signInCSP)
 	}
 
-	var buf bytes.Buffer
-	if err := t.ExecuteTemplate(&buf, "layout.html", p); err != nil {
+	buf := renderBufs.Get().(*bytes.Buffer)
+	buf.Reset()
+	defer func() {
+		if buf.Cap() <= maxPooledBuf {
+			renderBufs.Put(buf)
+		}
+	}()
+
+	if err := t.ExecuteTemplate(buf, "layout.html", p); err != nil {
 		s.log.Error("render template", "name", name, "error", err)
 		http.Error(w, "Something went wrong.", http.StatusInternalServerError)
 		return

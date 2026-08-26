@@ -15,10 +15,13 @@ import (
 // failing in a way that reveals the id exists.
 func (s *Store) SetFeedRoutes(ctx context.Context, userID, feedID int64, destinationIDs []int64) error {
 	return s.tx(ctx, func(tx *sql.Tx) error {
-		// The feed must belong to the caller.
+		// The caller must actually be subscribed to the feed. Feeds are shared
+		// now, so "is this yours" is a question about the subscription rather
+		// than about the feed — and asking the feed would let any account route
+		// a feed it merely knows the id of.
 		var owned int
 		if err := tx.QueryRowContext(ctx,
-			`SELECT count(*) FROM feeds WHERE id = ? AND user_id = ?`, feedID, userID).Scan(&owned); err != nil {
+			`SELECT count(*) FROM subscriptions WHERE feed_id = ? AND user_id = ?`, feedID, userID).Scan(&owned); err != nil {
 			return err
 		}
 		if owned == 0 {
@@ -51,7 +54,7 @@ func (s *Store) SetFeedRoutes(ctx context.Context, userID, feedID int64, destina
 
 // FeedRoutes lists the destination ids a feed publishes to.
 func (s *Store) FeedRoutes(ctx context.Context, userID, feedID int64) ([]int64, error) {
-	rows, err := s.db.QueryContext(ctx,
+	rows, err := s.ro.QueryContext(ctx,
 		`SELECT destination_id FROM feed_destinations WHERE feed_id = ? AND user_id = ? ORDER BY destination_id`,
 		feedID, userID)
 	if err != nil {
@@ -70,7 +73,7 @@ func (s *Store) FeedRoutes(ctx context.Context, userID, feedID int64) ([]int64, 
 }
 
 // Connecting a new feed to the account's existing destinations, and a new
-// destination to its existing feeds, happens inside SetFeed and
+// destination to its existing feeds, happens inside Subscribe and
 // CreateDestination respectively. It belongs in those transactions rather than
 // in a helper here: a feed that exists for even a moment without its routing
 // would poll and deliver nowhere.
@@ -85,7 +88,7 @@ type RoutedDestination struct {
 // DestinationsForFeed lists every destination the user owns, marking the ones
 // the feed publishes to. The UI needs both halves to render the checkboxes.
 func (s *Store) DestinationsForFeed(ctx context.Context, userID, feedID int64) ([]*RoutedDestination, error) {
-	rows, err := s.db.QueryContext(ctx, `
+	rows, err := s.ro.QueryContext(ctx, `
 		SELECT d.id, d.user_id, d.kind, d.label, d.config, d.credentials, d.template, d.paused,
 			d.created_at, d.last_ok_at, d.last_error,
 			CASE WHEN fd.destination_id IS NULL THEN 0 ELSE 1 END AS routed

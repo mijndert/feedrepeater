@@ -32,7 +32,7 @@ guard that blocks requests to private addresses.
 | `FR_SECRET_KEY` | yes | | 32 bytes of hex. Generate with `feedrepeater genkey`. Every stored credential is encrypted under a key derived from it. |
 | `FR_ADDR` | | `127.0.0.1:8080` | Listen address. |
 | `FR_DB_PATH` | | `feedrepeater.db` | SQLite file. |
-| `FR_MIN_POLL_INTERVAL` | | `15m` | How often every feed is fetched. Flat during the beta. |
+| `FR_MIN_POLL_INTERVAL` | | `15m` | The floor on how often a feed is fetched. A feed that keeps producing entries is checked this often; one that goes quiet is checked less. See [Polling](#polling). |
 | `FR_MAX_ITEMS_PER_POLL` | | `5` | Entries delivered per poll. A larger burst is recorded but not posted, so a feed that renumbers its ids cannot flood a timeline. |
 | `FR_ALLOW_PRIVATE_NETWORKS` | | | Set to `1` to disable the private-address guard. Development only. |
 | `FR_MAX_ACCOUNTS` | | unlimited | Stop accepting new accounts past this many. Existing accounts always sign in. |
@@ -248,35 +248,86 @@ disturb one already on its way.
 
 ## Polling
 
-Every feed is fetched on one flat interval, `FR_MIN_POLL_INTERVAL`, whatever it
-has been doing. There is no widening while a feed is quiet, no slower lane for a
-feed that delivers nowhere, and no growing delay after a failure. At 15m that is
-96 requests a day per feed, which is the trade being made while the service is
-small: predictable behaviour now, an adaptive schedule when the bill argues for
-one.
+A feed is asked as often as it has recently earned. `FR_MIN_POLL_INTERVAL` is
+the floor and every feed starts there; a feed that goes on producing nothing
+climbs away from it, and the first new entry drops it straight back down.
 
-What holds the rate down instead, none of it a ramp:
+| Quiet for | Checked every |
+|---|---|
+| under a day | the floor — 15m by default |
+| under a week | 2× the floor |
+| under a month | 8× the floor |
+| longer | 24× the floor |
+
+The ladder is in multiples rather than absolute durations, so setting a
+one-minute interval for development gets a one-minute service rather than one
+that quietly decides half an hour is close enough. A feed nobody has ticked a
+destination for is checked at 4× the floor at best: its entries are still
+recorded, so connecting something later starts from the right place, but nothing
+is waiting on a prompt answer.
+
+**A feed is fetched once, however many accounts follow it.** Feeds are shared,
+addressed by their URL rather than owned. The twentieth account to add a popular
+blog costs one row — the entries are already there, and it joins at the current
+watermark so none of that backlog is delivered to it. This is why `/stats`
+publishes `feeds.subscriptions` alongside `feeds.total`: the gap between the two
+is fetches that are no longer being made.
+
+Adding a feed still fetches it once, even when this service already follows the
+address for somebody else. Skipping that would be quicker, and the fact that it
+was skipped would be visible in the response — which would let anyone with an
+account submit addresses and learn which feeds this service's users read. Feed
+contents are public; who reads them here is not.
+
+Two consequences of sharing are worth knowing, since neither is visible from the
+dashboard:
+
+- **"Check now" pulls the feed forward for every subscriber**, because there is
+  only one poll to pull forward. It is one fetch either way, which is why the
+  button is rate limited per account.
+- **A feed's error state is the feed's, not yours.** If a shared feed starts
+  failing, everyone subscribed to it sees the same "Failing" line and the same
+  message. Nothing per-account is in it — only what the feed's own server said.
+  Pausing, by contrast, is yours alone. A feed stopped by the dead-feed rule is
+  revived for everyone the next time anybody subscribes to it — nothing else
+  clears it, and with the feed shared, unsubscribing does not get you a fresh
+  one while another account still holds it. The reason it stopped stays on the
+  dashboard until a fetch actually succeeds, so a revival does not read as a
+  recovery that has not happened.
+
+What holds the rate down beyond the schedule itself:
 
 - **Conditional requests.** ETag and If-Modified-Since on every fetch, so a
   feed that has not changed usually costs a 304 and no body.
+- **Body hashing.** Plenty of servers support neither header and answer 200 with
+  identical bytes forever. The digest of the last document parsed is stored and
+  compared, so that case costs the transfer and nothing else — no parse, and
+  none of the several hundred no-op inserts behind it.
 - **Per-host spacing.** At most one request every 5 seconds to any one host, so
-  several accounts subscribing to the same popular domain do not arrive together.
+  several accounts subscribing to the same popular domain do not arrive
+  together. A feed whose host was just contacted is pushed out rather than
+  skipped, so it does not sit at the head of the queue blocking what is behind
+  it.
 - **Jitter.** Every scheduled time is spread ±15%, so feeds added on the same
   afternoon do not stay synchronised, and a restart does not produce a spike.
-- **The server's own wishes.** `Retry-After` on 429 and 503 is obeyed, capped at
-  24 hours. This is the one thing that can push a feed past the interval: it is
-  a demand from someone else's server, and ignoring it is how a service gets
-  blocked outright. `Cache-Control: max-age` is no longer treated as a minimum,
-  because on a flat schedule it would be the ramp coming back through the door.
-- **Dead feeds stop.** After two weeks of unbroken failures the feed is paused
+- **The server's own wishes.** `Retry-After` on 429 and 503 is obeyed, and
+  `Cache-Control: max-age` is honoured as a minimum — a server that says it
+  caches for an hour is telling us not to ask again for an hour, which is a
+  cheaper thing to obey than a rate limit later. Both are capped at 24 hours,
+  and neither can pull an interval in, only push it out.
+- **Dead feeds stop.** After two weeks of unbroken failures the feed is stopped
   and the dashboard says why. The rule is elapsed time rather than a count of
-  attempts, so it means the same thing at any interval.
+  attempts, so it means the same thing at any point on the ladder. Stopping is a
+  property of the feed and applies to every subscriber; a subscriber's own pause
+  is separate and affects only them.
 
 ## Design notes
 
-**One database connection.** The pool is capped at one, which removes every
-`SQLITE_BUSY` path. It serialises requests, which is the right trade until it
-isn't.
+**One writer, many readers.** Writes go through a single connection, which
+removes every `SQLITE_BUSY` path and costs nothing at this size. Reads have
+their own pool: WAL lets them run against the last committed snapshot while a
+write is in flight, so a public `/stats` scan or one slow dashboard is no longer
+a queue for everybody.
 
 **Every outbound URL is untrusted.** Feed addresses, webhook endpoints, instance
 hostnames, and Bluesky PDS endpoints all come from users. `internal/safehttp`

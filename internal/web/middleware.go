@@ -77,14 +77,25 @@ func (w *statusWriter) WriteHeader(code int) {
 	w.ResponseWriter.WriteHeader(code)
 }
 
+// unlogged are paths whose requests say nothing and arrive constantly. Static
+// assets are one line per file per uncached visitor, and the health check is one
+// every thirty seconds forever. Failures still get a line: the filter is on the
+// status, not on the path.
+func unlogged(path string) bool {
+	return strings.HasPrefix(path, "/static/") || path == "/healthz" || path == "/favicon.ico"
+}
+
 func (s *Server) logRequests(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 		sw := &statusWriter{ResponseWriter: w, status: http.StatusOK}
 		next.ServeHTTP(sw, r)
 		level := slog.LevelInfo
-		if sw.status >= 500 {
+		switch {
+		case sw.status >= 500:
 			level = slog.LevelError
+		case unlogged(r.URL.Path) && sw.status < 400:
+			return
 		}
 		// The path is logged but never the query string, which can carry an
 		// OAuth code.
@@ -177,28 +188,42 @@ func (l *limiter) allow(key string) bool {
 		}
 		l.nextSweep = now.Add(l.window)
 	}
-	// A hard ceiling in case a burst arrives faster than entries expire. The
-	// oldest windows are the ones closest to expiring anyway.
+	// An entry that already exists is answered without reference to the
+	// ceiling: it is being counted, it does not grow the map, and refusing it
+	// would mean the limiter stopped tracking exactly the keys it is holding.
+	if w, ok := l.seen[key]; ok && !now.After(w.until) {
+		if w.count >= l.limit {
+			return false
+		}
+		w.count++
+		return true
+	}
+
+	// A hard ceiling in case a burst arrives faster than entries expire.
+	//
+	// Evicting a live window is not an option: deleting an entry resets its
+	// count, so at the ceiling — which is exactly where the limiter matters —
+	// that hands whoever was evicted a fresh allowance. Failing to shrink is a
+	// safe way to fail; failing to limit is not.
+	//
+	// So: sweep everything expired, and if the map is still full, every one of
+	// those keys is a live window and there is no honest room to start
+	// tracking another. Refuse rather than grow. The sweep is O(n) but only
+	// reachable when full, and it leaves the map far below the ceiling, so the
+	// cost is amortised across the window rather than paid per request as the
+	// old whole-map scan for a single victim was.
 	if len(l.seen) >= maxLimiterKeys {
-		oldest, oldestKey := now.Add(l.window), ""
 		for k, v := range l.seen {
-			if v.until.Before(oldest) {
-				oldest, oldestKey = v.until, k
+			if now.After(v.until) {
+				delete(l.seen, k)
 			}
 		}
-		if oldestKey != "" {
-			delete(l.seen, oldestKey)
+		l.nextSweep = now.Add(l.window)
+		if len(l.seen) >= maxLimiterKeys {
+			return false
 		}
 	}
 
-	w, ok := l.seen[key]
-	if !ok || now.After(w.until) {
-		l.seen[key] = &window{count: 1, until: now.Add(l.window)}
-		return true
-	}
-	if w.count >= l.limit {
-		return false
-	}
-	w.count++
+	l.seen[key] = &window{count: 1, until: now.Add(l.window)}
 	return true
 }

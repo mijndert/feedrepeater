@@ -3,6 +3,7 @@ package web
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"time"
 
@@ -12,16 +13,26 @@ import (
 // statsTTL is how long a computed answer is reused.
 //
 // /stats is public and every field behind it is a count(*), which SQLite walks
-// row by row. With a single-connection pool that makes an uncached endpoint a
-// cheap way to serialise every other request behind it, so the numbers are
-// computed at most once a minute and handed out from memory in between. A stats
-// page a minute stale is not a stats page anyone notices.
+// row by row — so on a database with a few million deliveries it is the single
+// most expensive read the service performs, reachable by anyone, with no
+// session. It is computed at most once a minute and handed out from memory in
+// between. A stats page a minute stale is not a stats page anyone notices.
 const statsTTL = time.Minute
 
+// statsMaxAge is when a cached answer stops being worth serving at all. Past
+// the TTL a request gets the stale bytes and triggers a refresh behind it;
+// past this it waits for a fresh one, because numbers this old are wrong rather
+// than merely late.
+const statsMaxAge = 15 * time.Minute
+
 type statsFeeds struct {
-	Total  int `json:"total"`
-	Active int `json:"active"`
-	Paused int `json:"paused"`
+	Total   int `json:"total"`
+	Active  int `json:"active"`
+	Stopped int `json:"stopped"`
+	// Subscriptions is how many accounts follow a feed, counted across all of
+	// them. It exceeds Total by however much sharing is saving: the difference
+	// is fetches that used to be made and are not.
+	Subscriptions int `json:"subscriptions"`
 }
 
 type statsDestinations struct {
@@ -85,20 +96,102 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	w.Write(body)
 }
 
-// stats returns the encoded response, recomputing it only once per statsTTL.
+// stats returns the encoded response, recomputing it at most once per statsTTL.
+//
+// Past the TTL the caller is handed the bytes that are already there and a
+// refresh is started behind them. Recomputing in the request meant that whoever
+// happened to arrive first after expiry paid for the whole table scan, and
+// anyone arriving during it waited too — so the endpoint's cost landed on
+// visitors at random, and hardest exactly when the database was largest. Now
+// nobody waits on it unless the numbers have gone properly stale.
 //
 // The encoded bytes are cached rather than the struct, because every caller
 // wants the same bytes and encoding them once is the cheaper half.
 func (s *Server) stats(ctx context.Context) ([]byte, error) {
-	now := time.Now()
-
 	s.statsMu.Lock()
-	defer s.statsMu.Unlock()
-	if s.statsBody != nil && now.Sub(s.statsAt) < statsTTL {
-		return s.statsBody, nil
+	age := time.Since(s.statsAt)
+	fresh := s.statsBody != nil && age < statsTTL
+	servable := s.statsBody != nil && age < statsMaxAge
+
+	if fresh {
+		body := s.statsBody
+		s.statsMu.Unlock()
+		return body, nil
 	}
 
-	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	// One compute at a time, whatever the state of the cache.
+	//
+	// Guarding only the stale-but-servable path left the expensive case — cold
+	// cache, or nothing asked for a quarter of an hour — completely open: two
+	// hundred requests arriving after a restart ran two hundred concurrent
+	// eleven-way count(*) scans, each holding a reader connection from a pool
+	// sixteen wide. That is precisely the cost this cache exists to remove,
+	// relocated to the worst moment to pay it, by anyone, unauthenticated.
+	if s.statsRefresh {
+		if servable {
+			body := s.statsBody
+			s.statsMu.Unlock()
+			return body, nil
+		}
+		// Nothing worth serving, so wait for whoever is already computing.
+		wait := s.statsWait
+		s.statsMu.Unlock()
+		select {
+		case <-wait:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+		s.statsMu.Lock()
+		body := s.statsBody
+		s.statsMu.Unlock()
+		if body == nil {
+			return nil, errors.New("stats unavailable")
+		}
+		return body, nil
+	}
+
+	s.statsRefresh = true
+	s.statsWait = make(chan struct{})
+	if servable {
+		// Serve what is there and refresh behind them. Detached from the
+		// request: this visitor is not waiting for it, and cancelling when they
+		// navigate away would mean it never completes for anyone.
+		body := s.statsBody
+		s.statsMu.Unlock()
+		go s.refreshStats(context.WithoutCancel(ctx))
+		return body, nil
+	}
+	s.statsMu.Unlock()
+	// This caller does the compute itself, so it holds the claim and must
+	// release it — including on error, or nothing would ever compute again.
+	defer s.finishRefresh()
+	return s.computeStats(ctx)
+}
+
+// finishRefresh releases the single-compute claim and wakes anyone waiting.
+func (s *Server) finishRefresh() {
+	s.statsMu.Lock()
+	s.statsRefresh = false
+	if s.statsWait != nil {
+		close(s.statsWait)
+		s.statsWait = nil
+	}
+	s.statsMu.Unlock()
+}
+
+func (s *Server) refreshStats(ctx context.Context) {
+	defer s.finishRefresh()
+	if _, err := s.computeStats(ctx); err != nil {
+		s.log.Error("refresh stats", "error", err)
+	}
+}
+
+// computeStats does the scan and stores the result. Its caller holds the
+// single-compute claim and is responsible for releasing it via finishRefresh.
+func (s *Server) computeStats(ctx context.Context) ([]byte, error) {
+	now := time.Now()
+
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
 	st, err := s.store.Stats(ctx)
@@ -115,9 +208,10 @@ func (s *Server) stats(ctx context.Context) ([]byte, error) {
 		Users:     st.Users,
 		Instances: st.Instances,
 		Feeds: statsFeeds{
-			Total:  st.Feeds,
-			Active: st.FeedsActive,
-			Paused: st.Feeds - st.FeedsActive,
+			Total:         st.Feeds,
+			Active:        st.FeedsActive,
+			Stopped:       st.Feeds - st.FeedsActive,
+			Subscriptions: st.Subscriptions,
 		},
 		Items: st.Items,
 		Destinations: statsDestinations{
@@ -146,6 +240,13 @@ func (s *Server) stats(ctx context.Context) ([]byte, error) {
 	}
 	body = append(body, '\n')
 
-	s.statsBody, s.statsAt = body, now
+	s.statsMu.Lock()
+	// Never move the timestamp backwards. Two overlapping computes each stamp
+	// the time they started, so a slow early one landing after a fast later one
+	// would re-arm expiry and undo the newer answer.
+	if now.After(s.statsAt) {
+		s.statsBody, s.statsAt = body, now
+	}
+	s.statsMu.Unlock()
 	return body, nil
 }

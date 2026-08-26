@@ -8,8 +8,7 @@ import (
 
 // Recorder is the part of the store ingestion needs.
 type Recorder interface {
-	InsertItem(ctx context.Context, item *store.Item) (bool, error)
-	QueueDeliveries(ctx context.Context, userID, feedID, itemID int64) (int, error)
+	RecordEntries(ctx context.Context, feedID int64, items []store.Item, deliver bool, maxDeliver int) (store.RecordResult, error)
 }
 
 // IngestResult reports what one ingestion did.
@@ -31,12 +30,15 @@ type IngestResult struct {
 // when the feed is first saved and again on the first successful poll if the
 // save-time fetch did not get that far, so there is no window in which an
 // existing entry can be treated as new.
-func Ingest(ctx context.Context, rec Recorder, feedID, userID int64, entries []Entry, prime bool, maxDeliver int) (IngestResult, error) {
-	var res IngestResult
-
-	var fresh []int64
-	for _, e := range entries {
-		item := &store.Item{
+//
+// The whole batch goes down as one transaction. Which entries are new, and
+// which of those are inside the burst cap, is decided in the store with the
+// inserted ids in hand, because the answer and the deliveries it produces have
+// to commit together or not at all.
+func Ingest(ctx context.Context, rec Recorder, feedID int64, entries []Entry, prime bool, maxDeliver int) (IngestResult, error) {
+	items := make([]store.Item, len(entries))
+	for i, e := range entries {
+		items[i] = store.Item{
 			FeedID:      feedID,
 			GUID:        e.GUID,
 			URL:         e.URL,
@@ -45,35 +47,7 @@ func Ingest(ctx context.Context, rec Recorder, feedID, userID int64, entries []E
 			Author:      e.Author,
 			PublishedAt: e.Published,
 		}
-		isNew, err := rec.InsertItem(ctx, item)
-		if err != nil {
-			return res, err
-		}
-		if isNew {
-			fresh = append(fresh, item.ID)
-		}
 	}
-	res.New = len(fresh)
-
-	if prime || len(fresh) == 0 {
-		res.Skipped = len(fresh)
-		return res, nil
-	}
-
-	// A burst larger than the cap usually means the feed changed its ids or
-	// republished itself, not that the author posted forty times in an hour.
-	// Deliver the newest few and leave the rest recorded as seen.
-	if maxDeliver > 0 && len(fresh) > maxDeliver {
-		res.Skipped = len(fresh) - maxDeliver
-		fresh = fresh[len(fresh)-maxDeliver:]
-	}
-
-	for _, id := range fresh {
-		n, err := rec.QueueDeliveries(ctx, userID, feedID, id)
-		if err != nil {
-			return res, err
-		}
-		res.Queued += n
-	}
-	return res, nil
+	res, err := rec.RecordEntries(ctx, feedID, items, !prime, maxDeliver)
+	return IngestResult{New: res.New, Queued: res.Queued, Skipped: res.Skipped}, err
 }

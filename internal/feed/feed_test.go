@@ -1,8 +1,10 @@
 package feed
 
 import (
+	"fmt"
 	"strings"
 	"testing"
+	"time"
 )
 
 const rssSample = `<?xml version="1.0"?>
@@ -141,5 +143,38 @@ func TestTrimHeader(t *testing.T) {
 	}
 	if got := trimHeader(strings.Repeat("a", 500), 200); got != "" {
 		t.Errorf("oversized header kept: %q", got)
+	}
+}
+
+// A feed written oldest-first with more entries than the cap must lose its
+// oldest, not its newest. Truncating the document before sorting dropped
+// whichever end the publisher put last — and with the body-hash short-circuit
+// an unchanged feed is never re-parsed, so that loss no longer heals.
+func TestParseKeepsTheNewestWhenCapping(t *testing.T) {
+	var b strings.Builder
+	b.WriteString(`<rss><channel><title>Long</title>`)
+	for i := range MaxEntries + 50 {
+		fmt.Fprintf(&b, `<item><guid>g%03d</guid><title>Entry %03d</title>
+			<pubDate>%s</pubDate></item>`,
+			i, i, time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC).
+				Add(time.Duration(i)*time.Hour).Format(time.RFC1123Z))
+	}
+	b.WriteString(`</channel></rss>`)
+
+	res, err := Parse([]byte(b.String()), "https://example.com/feed.xml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Entries) != MaxEntries {
+		t.Fatalf("kept %d entries, want %d", len(res.Entries), MaxEntries)
+	}
+	// Oldest first, so the last one is the newest the document carried.
+	newest := res.Entries[len(res.Entries)-1]
+	if want := fmt.Sprintf("g%03d", MaxEntries+49); newest.GUID != want {
+		t.Errorf("newest kept entry is %s, want %s", newest.GUID, want)
+	}
+	oldest := res.Entries[0]
+	if want := fmt.Sprintf("g%03d", 50); oldest.GUID != want {
+		t.Errorf("oldest kept entry is %s, want %s", oldest.GUID, want)
 	}
 }

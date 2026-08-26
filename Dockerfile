@@ -44,7 +44,12 @@ ENV FR_DB_PATH=/data/feedrepeater.db \
 EXPOSE 8080
 VOLUME ["/data"]
 
-HEALTHCHECK --interval=30s --timeout=3s --start-period=5s \
+# Every run forks a wget and asks the process for a database probe. The endpoint
+# caches its probe, so the cost is now the fork rather than the query, but a
+# minute is still the right cadence for "is this container alive" — thirty
+# seconds was buying two chances a minute to notice something that a restart
+# takes longer than that to fix anyway.
+HEALTHCHECK --interval=60s --timeout=3s --start-period=5s \
   CMD wget -qO- http://127.0.0.1:8080/healthz >/dev/null || exit 1
 
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

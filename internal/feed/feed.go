@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/mmcdole/gofeed"
@@ -27,6 +28,14 @@ const (
 	MaxURLLen     = 2000
 	MaxGUIDLen    = 500
 	MaxEntries    = 200
+
+	// MaxFeedBytes caps a feed document. The shared client allows five
+	// megabytes because a webhook or an instance API may legitimately answer
+	// with one, but a feed that size is a mistake or an attack: gofeed builds
+	// the whole document in memory at several times its byte size, so the cap
+	// is really a cap on what one poll can allocate, multiplied by however many
+	// polls run at once.
+	MaxFeedBytes = 2 << 20
 )
 
 // Entry is a normalised feed item.
@@ -48,6 +57,13 @@ type Result struct {
 	// Hint is how long the server asked to be left alone, from Cache-Control
 	// max-age. Zero when it did not say.
 	Hint time.Duration
+	// Unchanged reports that the body was byte-for-byte what was fetched last
+	// time, so it was not parsed and Entries is empty. Distinct from
+	// NotModified, which is the server saying so and costs no body at all.
+	Unchanged bool
+	// BodyHash identifies the document that was parsed, for the caller to store
+	// and hand back on the next fetch.
+	BodyHash []byte
 	// Entries are ordered oldest first, so they are posted in the order they
 	// were published.
 	Entries []Entry
@@ -60,7 +76,13 @@ type Fetcher struct {
 func NewFetcher(hc *safehttp.Client) *Fetcher { return &Fetcher{http: hc} }
 
 // Fetch retrieves a feed, using conditional headers when the caller has them.
-func (f *Fetcher) Fetch(ctx context.Context, feedURL, etag, lastModified string) (*Result, error) {
+//
+// prevHash is the digest of the body parsed last time, or nil. Plenty of servers
+// support neither ETag nor Last-Modified and answer 200 with identical bytes
+// forever; without this that costs a full parse and a few hundred no-op inserts
+// on every interval, for a document that has not moved since March. Hashing the
+// body is a few microseconds and turns all of that into a comparison.
+func (f *Fetcher) Fetch(ctx context.Context, feedURL, etag, lastModified string, prevHash []byte) (*Result, error) {
 	got, err := f.get(ctx, feedURL, etag, lastModified)
 	if err != nil {
 		return nil, err
@@ -71,13 +93,28 @@ func (f *Fetcher) Fetch(ctx context.Context, feedURL, etag, lastModified string)
 			ETag:         etag,
 			LastModified: lastModified,
 			Hint:         got.hint,
+			BodyHash:     prevHash,
 		}, nil
 	}
+
+	sum := sha256.Sum256(got.body)
+	hash := sum[:]
+	if len(prevHash) > 0 && bytes.Equal(prevHash, hash) {
+		return &Result{
+			Unchanged:    true,
+			ETag:         got.etag,
+			LastModified: got.lastModified,
+			Hint:         got.hint,
+			BodyHash:     hash,
+		}, nil
+	}
+
 	res, err := Parse(got.body, feedURL)
 	if err != nil {
 		return nil, err
 	}
 	res.ETag, res.LastModified, res.Hint = got.etag, got.lastModified, got.hint
+	res.BodyHash = hash
 	return res, nil
 }
 
@@ -123,7 +160,7 @@ func (f *Fetcher) get(ctx context.Context, feedURL, etag, lastModified string) (
 		}
 	}
 
-	body, err := f.http.ReadBody(resp)
+	body, err := f.http.ReadLimited(resp, MaxFeedBytes)
 	if err != nil {
 		return nil, err
 	}
@@ -187,10 +224,18 @@ func cacheHint(v string) time.Duration {
 	return 0
 }
 
+// parsers reuses gofeed parsers across polls. Each one carries three format
+// parsers and their translators, all of which are allocated by NewParser and
+// none of which hold state between documents, so building a fresh set per fetch
+// was garbage the collector had to deal with on every poll of every feed.
+var parsers = sync.Pool{New: func() any { return gofeed.NewParser() }}
+
 // Parse normalises a feed document. base is the feed URL, used to resolve
 // relative entry links.
 func Parse(body []byte, base string) (*Result, error) {
-	parsed, err := gofeed.NewParser().Parse(bytes.NewReader(body))
+	p := parsers.Get().(*gofeed.Parser)
+	parsed, err := p.Parse(bytes.NewReader(body))
+	parsers.Put(p)
 	if err != nil {
 		return nil, fmt.Errorf("could not read that feed: %w", err)
 	}
@@ -201,10 +246,7 @@ func Parse(body []byte, base string) (*Result, error) {
 	// markup, control characters and bidi overrides. Trimming alone let a feed
 	// publish direction-reversed text under the account holder's name.
 	res := &Result{Title: clip(collapse(parsed.Title), MaxTitleLen)}
-	for i, item := range parsed.Items {
-		if i >= MaxEntries {
-			break
-		}
+	for _, item := range parsed.Items {
 		if e, ok := normalize(item, baseURL); ok {
 			res.Entries = append(res.Entries, e)
 		}
@@ -222,6 +264,21 @@ func Parse(body []byte, base string) (*Result, error) {
 	})
 	if allUndated(res.Entries) {
 		reverse(res.Entries)
+	}
+
+	// Truncate after sorting, keeping the newest.
+	//
+	// Cutting the document at MaxEntries before the sort throws away whichever
+	// end the publisher happened to put last, so a feed written oldest-first
+	// with more than MaxEntries lost exactly the entries worth having. That was
+	// survivable while every poll re-read the whole document and might sort
+	// differently; with the body hash, an unchanged feed is not parsed again, so
+	// the loss is permanent.
+	//
+	// The count is bounded by MaxFeedBytes long before it reaches here, so
+	// normalising the whole document first is not a way to make this allocate.
+	if len(res.Entries) > MaxEntries {
+		res.Entries = res.Entries[len(res.Entries)-MaxEntries:]
 	}
 	return res, nil
 }

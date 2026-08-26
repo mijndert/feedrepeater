@@ -57,7 +57,7 @@ func (f *Fetcher) Resolve(ctx context.Context, raw string) (string, *Result, err
 		if err != nil {
 			continue
 		}
-		res, err := f.Fetch(ctx, u.String(), "", "")
+		res, err := f.Fetch(ctx, u.String(), "", "", nil)
 		if err != nil {
 			continue
 		}

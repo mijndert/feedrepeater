@@ -5,7 +5,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"errors"
 	"fmt"
 	"log/slog"
 	"math"
@@ -98,42 +97,39 @@ func (p *Publisher) Send(ctx context.Context, d *store.Destination, item destina
 }
 
 // Deliver processes one queued delivery and records the outcome.
-func (p *Publisher) Deliver(ctx context.Context, dl *store.Delivery) {
-	item, dest, err := p.store.DeliveryTargets(ctx, dl)
-	if err != nil {
-		if errors.Is(err, store.ErrNotFound) {
-			// The entry or destination was deleted while queued.
-			_ = p.store.MarkDeliveryFailed(ctx, dl.ID, "destination or entry no longer exists")
-			return
-		}
-		p.log.Error("resolve delivery", "delivery", dl.ID, "error", err)
-		p.retry(ctx, dl, "temporary error", nil)
+//
+// Everything it needs arrived with the row. Resolving a delivery used to mean
+// four more queries — the entry, the destination, the feed for its title, the
+// account for its timezone — each one a round trip on a pool that was a single
+// connection, for every delivery in a burst.
+func (p *Publisher) Deliver(ctx context.Context, dl *store.DueDelivery) {
+	if dl.Destination.UserID != dl.UserID {
+		// Cannot happen without corruption — the query joins on it — but the
+		// worker sends under a user's credentials, so verify rather than assume.
+		p.log.Error("delivery/destination owner mismatch", "delivery", dl.ID)
+		_ = p.store.MarkDeliveryFailed(ctx, dl.ID, "destination does not belong to this account")
 		return
 	}
-	if dest.Paused {
+	if dl.Destination.Paused {
 		_ = p.store.MarkDeliveryFailed(ctx, dl.ID, "destination was paused")
 		return
 	}
 
-	feedTitle, feedURL := "", ""
-	if f, err := p.store.FeedByUser(ctx, dl.UserID); err == nil {
-		feedTitle, feedURL = f.Title, f.URL
-	}
-
 	published := time.Time{}
-	if item.PublishedAt != nil {
-		published = *item.PublishedAt
+	if dl.Item.PublishedAt != nil {
+		published = *dl.Item.PublishedAt
 	}
 
-	res, err := p.Send(ctx, dest, destination.Item{
-		Title:     item.Title,
-		URL:       item.URL,
-		Summary:   item.Summary,
-		Author:    item.Author,
+	dest := dl.Destination
+	res, err := p.Send(ctx, &dest, destination.Item{
+		Title:     dl.Item.Title,
+		URL:       dl.Item.URL,
+		Summary:   dl.Item.Summary,
+		Author:    dl.Item.Author,
 		Published: published,
-		FeedTitle: feedTitle,
-		FeedURL:   feedURL,
-	}, p.location(ctx, dl.UserID), idempotencyKey(dl))
+		FeedTitle: dl.FeedTitle,
+		FeedURL:   dl.FeedURL,
+	}, store.ParseLocation(dl.Timezone), idempotencyKey(dl))
 
 	if err != nil {
 		reason := userMessage(err)
@@ -157,22 +153,10 @@ func (p *Publisher) Deliver(ctx context.Context, dl *store.Delivery) {
 	}
 }
 
-// location reports the timezone the account reads dates in, which is what
-// {{published}} renders in. A lookup that fails is UTC rather than an abandoned
-// delivery: a date in the wrong zone is a smaller problem than a post that never
-// goes out.
-func (p *Publisher) location(ctx context.Context, userID int64) *time.Location {
-	tz, err := p.store.UserTimezone(ctx, userID)
-	if err != nil {
-		return time.UTC
-	}
-	return store.ParseLocation(tz)
-}
-
 // retry schedules the next attempt. A service that said how long to wait gets
 // what it asked for when that is longer than our own backoff: being told to
 // slow down and speeding up instead is how a rate limit becomes a ban.
-func (p *Publisher) retry(ctx context.Context, dl *store.Delivery, reason string, cause error) {
+func (p *Publisher) retry(ctx context.Context, dl *store.DueDelivery, reason string, cause error) {
 	delay := backoff(dl.Attempts + 1)
 	if asked, ok := destination.RetryAfter(cause); ok && asked > delay {
 		delay = asked
@@ -193,7 +177,7 @@ func backoff(attempt int) time.Duration {
 
 // idempotencyKey is stable for a delivery so a retry that actually reached the
 // service does not produce a second post.
-func idempotencyKey(dl *store.Delivery) string {
+func idempotencyKey(dl *store.DueDelivery) string {
 	sum := sha256.Sum256(fmt.Appendf(nil, "feedrepeater/%d/%d/%d", dl.ID, dl.ItemID, dl.DestinationID))
 	return hex.EncodeToString(sum[:16])
 }

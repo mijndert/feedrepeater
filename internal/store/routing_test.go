@@ -36,13 +36,13 @@ func TestNewDestinationIsRoutedToExistingFeeds(t *testing.T) {
 	ctx := context.Background()
 	alice := testUser(t, st, "alice")
 
-	f, err := st.SetFeed(ctx, alice.ID, "https://example.com/feed.xml")
+	f, _, err := st.Subscribe(ctx, alice.ID, "https://example.com/feed.xml", "", nil, FetchState{NextFetchAt: time.Now().UTC()})
 	if err != nil {
 		t.Fatal(err)
 	}
 	d := newDestination(t, st, alice.ID, "hook")
 
-	routes, err := st.FeedRoutes(ctx, alice.ID, f.ID)
+	routes, err := st.FeedRoutes(ctx, alice.ID, f.FeedID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -59,12 +59,12 @@ func TestNewFeedIsRoutedToExistingDestinations(t *testing.T) {
 
 	a := newDestination(t, st, alice.ID, "one")
 	b := newDestination(t, st, alice.ID, "two")
-	f, err := st.SetFeed(ctx, alice.ID, "https://example.com/feed.xml")
+	f, _, err := st.Subscribe(ctx, alice.ID, "https://example.com/feed.xml", "", nil, FetchState{NextFetchAt: time.Now().UTC()})
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	routes, err := st.FeedRoutes(ctx, alice.ID, f.ID)
+	routes, err := st.FeedRoutes(ctx, alice.ID, f.FeedID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -83,28 +83,28 @@ func TestSetFeedRoutesReplacesTheSet(t *testing.T) {
 
 	a := newDestination(t, st, alice.ID, "one")
 	b := newDestination(t, st, alice.ID, "two")
-	f, _ := st.SetFeed(ctx, alice.ID, "https://example.com/feed.xml")
+	f, _, _ := st.Subscribe(ctx, alice.ID, "https://example.com/feed.xml", "", nil, FetchState{NextFetchAt: time.Now().UTC()})
 
-	if err := st.SetFeedRoutes(ctx, alice.ID, f.ID, []int64{b.ID}); err != nil {
+	if err := st.SetFeedRoutes(ctx, alice.ID, f.FeedID, []int64{b.ID}); err != nil {
 		t.Fatal(err)
 	}
-	routes, _ := st.FeedRoutes(ctx, alice.ID, f.ID)
+	routes, _ := st.FeedRoutes(ctx, alice.ID, f.FeedID)
 	if len(routes) != 1 || routes[0] != b.ID {
 		t.Errorf("routes = %v, want [%d]", routes, b.ID)
 	}
 
 	// Clearing the set is allowed: the feed then posts nowhere.
-	if err := st.SetFeedRoutes(ctx, alice.ID, f.ID, nil); err != nil {
+	if err := st.SetFeedRoutes(ctx, alice.ID, f.FeedID, nil); err != nil {
 		t.Fatal(err)
 	}
-	if routes, _ := st.FeedRoutes(ctx, alice.ID, f.ID); len(routes) != 0 {
+	if routes, _ := st.FeedRoutes(ctx, alice.ID, f.FeedID); len(routes) != 0 {
 		t.Errorf("routes = %v, want none", routes)
 	}
 
-	if err := st.SetFeedRoutes(ctx, alice.ID, f.ID, []int64{a.ID, b.ID}); err != nil {
+	if err := st.SetFeedRoutes(ctx, alice.ID, f.FeedID, []int64{a.ID, b.ID}); err != nil {
 		t.Fatal(err)
 	}
-	if routes, _ := st.FeedRoutes(ctx, alice.ID, f.ID); len(routes) != 2 {
+	if routes, _ := st.FeedRoutes(ctx, alice.ID, f.FeedID); len(routes) != 2 {
 		t.Errorf("routes = %v, want both", routes)
 	}
 }
@@ -117,22 +117,22 @@ func TestSetFeedRoutesIgnoresForeignDestinations(t *testing.T) {
 	alice := testUser(t, st, "alice")
 	mallory := testUser(t, st, "mallory")
 
-	f, _ := st.SetFeed(ctx, mallory.ID, "https://example.com/mallory.xml")
+	f, _, _ := st.Subscribe(ctx, mallory.ID, "https://example.com/mallory.xml", "", nil, FetchState{NextFetchAt: time.Now().UTC()})
 	victim := newDestination(t, st, alice.ID, "Alice's hook")
 
-	if err := st.SetFeedRoutes(ctx, mallory.ID, f.ID, []int64{victim.ID}); err != nil {
+	if err := st.SetFeedRoutes(ctx, mallory.ID, f.FeedID, []int64{victim.ID}); err != nil {
 		t.Fatal(err)
 	}
-	if routes, _ := st.FeedRoutes(ctx, mallory.ID, f.ID); len(routes) != 0 {
+	if routes, _ := st.FeedRoutes(ctx, mallory.ID, f.FeedID); len(routes) != 0 {
 		t.Errorf("attached another account's destination: %v", routes)
 	}
 
 	// And the feed itself must belong to the caller.
-	aliceFeed, _ := st.SetFeed(ctx, alice.ID, "https://example.com/alice.xml")
-	if err := st.SetFeedRoutes(ctx, mallory.ID, aliceFeed.ID, nil); !errors.Is(err, ErrNotFound) {
+	aliceFeed, _, _ := st.Subscribe(ctx, alice.ID, "https://example.com/alice.xml", "", nil, FetchState{NextFetchAt: time.Now().UTC()})
+	if err := st.SetFeedRoutes(ctx, mallory.ID, aliceFeed.FeedID, nil); !errors.Is(err, ErrNotFound) {
 		t.Errorf("routing another account's feed = %v, want ErrNotFound", err)
 	}
-	if routes, _ := st.FeedRoutes(ctx, alice.ID, aliceFeed.ID); len(routes) != 1 {
+	if routes, _ := st.FeedRoutes(ctx, alice.ID, aliceFeed.FeedID); len(routes) != 1 {
 		t.Errorf("another account cleared the routes: %v", routes)
 	}
 }
@@ -143,19 +143,19 @@ func TestQueueDeliveriesFollowsRouting(t *testing.T) {
 	ctx := context.Background()
 	alice := testUser(t, st, "alice")
 
-	f, _ := st.SetFeed(ctx, alice.ID, "https://example.com/feed.xml")
+	f, _, _ := st.Subscribe(ctx, alice.ID, "https://example.com/feed.xml", "", nil, FetchState{NextFetchAt: time.Now().UTC()})
 	wanted := newDestination(t, st, alice.ID, "wanted")
 	newDestination(t, st, alice.ID, "not wanted")
 
-	if err := st.SetFeedRoutes(ctx, alice.ID, f.ID, []int64{wanted.ID}); err != nil {
+	if err := st.SetFeedRoutes(ctx, alice.ID, f.FeedID, []int64{wanted.ID}); err != nil {
 		t.Fatal(err)
 	}
 
-	item := &Item{FeedID: f.ID, GUID: "g1", Title: "One"}
+	item := &Item{FeedID: f.FeedID, GUID: "g1", Title: "One"}
 	if _, err := st.InsertItem(ctx, item); err != nil {
 		t.Fatal(err)
 	}
-	n, err := st.QueueDeliveries(ctx, alice.ID, f.ID, item.ID)
+	n, err := st.QueueDeliveries(ctx, f.FeedID, item.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -178,17 +178,17 @@ func TestUnroutedDestinationReceivesNothing(t *testing.T) {
 	ctx := context.Background()
 	alice := testUser(t, st, "alice")
 
-	f, _ := st.SetFeed(ctx, alice.ID, "https://example.com/feed.xml")
+	f, _, _ := st.Subscribe(ctx, alice.ID, "https://example.com/feed.xml", "", nil, FetchState{NextFetchAt: time.Now().UTC()})
 	newDestination(t, st, alice.ID, "hook")
-	if err := st.SetFeedRoutes(ctx, alice.ID, f.ID, nil); err != nil {
+	if err := st.SetFeedRoutes(ctx, alice.ID, f.FeedID, nil); err != nil {
 		t.Fatal(err)
 	}
 
-	item := &Item{FeedID: f.ID, GUID: "g1", Title: "One"}
+	item := &Item{FeedID: f.FeedID, GUID: "g1", Title: "One"}
 	if _, err := st.InsertItem(ctx, item); err != nil {
 		t.Fatal(err)
 	}
-	n, err := st.QueueDeliveries(ctx, alice.ID, f.ID, item.ID)
+	n, err := st.QueueDeliveries(ctx, f.FeedID, item.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -202,14 +202,14 @@ func TestDestinationsForFeedMarksRouting(t *testing.T) {
 	ctx := context.Background()
 	alice := testUser(t, st, "alice")
 
-	f, _ := st.SetFeed(ctx, alice.ID, "https://example.com/feed.xml")
+	f, _, _ := st.Subscribe(ctx, alice.ID, "https://example.com/feed.xml", "", nil, FetchState{NextFetchAt: time.Now().UTC()})
 	on := newDestination(t, st, alice.ID, "on")
 	off := newDestination(t, st, alice.ID, "off")
-	if err := st.SetFeedRoutes(ctx, alice.ID, f.ID, []int64{on.ID}); err != nil {
+	if err := st.SetFeedRoutes(ctx, alice.ID, f.FeedID, []int64{on.ID}); err != nil {
 		t.Fatal(err)
 	}
 
-	list, err := st.DestinationsForFeed(ctx, alice.ID, f.ID)
+	list, err := st.DestinationsForFeed(ctx, alice.ID, f.FeedID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -231,7 +231,7 @@ func TestDestinationsForFeedMarksRouting(t *testing.T) {
 
 	// Another account's feed id must not reveal or mark anything.
 	mallory := testUser(t, st, "mallory")
-	other, err := st.DestinationsForFeed(ctx, mallory.ID, f.ID)
+	other, err := st.DestinationsForFeed(ctx, mallory.ID, f.FeedID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -246,12 +246,12 @@ func TestDeletingADestinationClearsItsRoutes(t *testing.T) {
 	ctx := context.Background()
 	alice := testUser(t, st, "alice")
 
-	f, _ := st.SetFeed(ctx, alice.ID, "https://example.com/feed.xml")
+	f, _, _ := st.Subscribe(ctx, alice.ID, "https://example.com/feed.xml", "", nil, FetchState{NextFetchAt: time.Now().UTC()})
 	d := newDestination(t, st, alice.ID, "hook")
 	if err := st.DeleteDestination(ctx, alice.ID, d.ID); err != nil {
 		t.Fatal(err)
 	}
-	if routes, _ := st.FeedRoutes(ctx, alice.ID, f.ID); len(routes) != 0 {
+	if routes, _ := st.FeedRoutes(ctx, alice.ID, f.FeedID); len(routes) != 0 {
 		t.Errorf("routes survived destination deletion: %v", routes)
 	}
 	if n := countRows(t, st, "feed_destinations"); n != 0 {

@@ -66,7 +66,12 @@ func (s *Server) startSession(w http.ResponseWriter, r *http.Request, userID int
 
 func (s *Server) endSession(w http.ResponseWriter, r *http.Request) {
 	if c, err := r.Cookie(s.sessionCookieName()); err == nil {
-		_ = s.store.DeleteSession(r.Context(), secret.Hash(c.Value))
+		id := secret.Hash(c.Value)
+		_ = s.store.DeleteSession(r.Context(), id)
+		// After the delete: forgetting first leaves a window in which a
+		// concurrent request re-reads the still-live row and caches it for
+		// another TTL, which is a signed-out session that keeps working.
+		s.forgetSession(id)
 	}
 	http.SetCookie(w, &http.Cookie{
 		Name:     s.sessionCookieName(),
@@ -79,6 +84,21 @@ func (s *Server) endSession(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// sessionCacheTTL is how long a resolved session is reused.
+//
+// Every authenticated request resolved its session with a query, so a dashboard
+// and its stylesheet were two round trips before either handler started. The
+// answer changes when someone signs in, signs out, or edits their profile, and
+// all three of those drop the entry explicitly — so this window is what remains
+// for the case nothing invalidated: a session revoked in another browser stays
+// usable for a few more seconds.
+const sessionCacheTTL = 30 * time.Second
+
+type cachedSession struct {
+	user *store.User
+	at   time.Time
+}
+
 // currentUser resolves the signed-in user, if any.
 func (s *Server) currentUser(r *http.Request) (*store.User, string) {
 	c, err := r.Cookie(s.sessionCookieName())
@@ -86,14 +106,68 @@ func (s *Server) currentUser(r *http.Request) (*store.User, string) {
 		return nil, ""
 	}
 	id := secret.Hash(c.Value)
+
+	if v, ok := s.sessions.Load(id); ok {
+		if cs := v.(cachedSession); time.Since(cs.at) < sessionCacheTTL {
+			return cs.user, id
+		}
+		s.sessions.Delete(id)
+	}
+
 	user, err := s.store.SessionUser(r.Context(), id)
 	if err != nil {
 		if !errors.Is(err, store.ErrNotFound) {
 			s.log.Error("look up session", "error", err)
 		}
+		// A miss is cached as nothing at all rather than as a negative: a
+		// stranger sending random cookie values would otherwise be able to fill
+		// the map, and the database says no just as cheaply.
 		return nil, ""
 	}
+	s.sessions.Store(id, cachedSession{user: user, at: time.Now()})
 	return user, id
+}
+
+// forgetSession drops a cached session, for anything that changes what the
+// lookup would return.
+func (s *Server) forgetSession(id string) {
+	if id != "" {
+		s.sessions.Delete(id)
+	}
+}
+
+// forgetUser drops every cached session belonging to one account.
+//
+// forgetSession only reaches the session making the request. An account signed
+// in on a second browser keeps a cached *store.User there, and after the
+// account is deleted that resolves to a user whose row is gone — handlers fail
+// on a foreign key and render a 500, reads come back empty. No authorisation is
+// granted that the session did not already hold, so this is a confusing tail
+// rather than a bypass, but it is a tail with no reason to exist.
+func (s *Server) forgetUser(userID int64) {
+	s.sessions.Range(func(k, v any) bool {
+		if cs, ok := v.(cachedSession); ok && cs.user != nil && cs.user.ID == userID {
+			s.sessions.Delete(k)
+		}
+		return true
+	})
+}
+
+// sweepSessions drops cached entries nothing has asked about since they went
+// stale.
+//
+// Entries otherwise leave only when a later request on the same id finds them
+// expired, or when something explicitly forgets one — so a session used once
+// and abandoned stays resident for the life of the process. Bounded by real
+// sign-ins rather than by anything a stranger controls, so this is a slow leak
+// rather than a way in, but there is no reason to hold them.
+func (s *Server) sweepSessions() {
+	s.sessions.Range(func(k, v any) bool {
+		if cs, ok := v.(cachedSession); ok && time.Since(cs.at) >= sessionCacheTTL {
+			s.sessions.Delete(k)
+		}
+		return true
+	})
 }
 
 // userFrom returns the user attached by requireUser.

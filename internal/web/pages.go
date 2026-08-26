@@ -11,13 +11,12 @@ import (
 	"time"
 
 	"feedrepeater.com/internal/destination"
-	"feedrepeater.com/internal/feed"
 	"feedrepeater.com/internal/render"
 	"feedrepeater.com/internal/store"
 )
 
 type dashboardData struct {
-	Feed    *store.Feed
+	Feed    *store.FeedView
 	FeedURL string
 	// Destinations carries every destination the account owns, each marked
 	// with whether the feed publishes to it.
@@ -128,6 +127,7 @@ func (s *Server) handleFeedSave(w http.ResponseWriter, r *http.Request) {
 		s.dashboardError(w, r, "That address cannot be used. Enter a public http or https feed URL.", raw)
 		return
 	}
+
 	if !s.writeLimit.allow("feed:" + strconv.FormatInt(user.ID, 10)) {
 		s.dashboardError(w, r, "Too many changes. Try again later.", raw)
 		return
@@ -146,33 +146,53 @@ func (s *Server) handleFeedSave(w http.ResponseWriter, r *http.Request) {
 	}
 	discovered := feedURL != u.String()
 
-	f, err := s.store.SetFeed(r.Context(), user.ID, feedURL)
-	if err != nil {
+	// The address is always fetched, including when this service already follows
+	// it for somebody else.
+	//
+	// Skipping the fetch for a known feed was free and quick, and that was the
+	// problem: whether a fetch happened was observable from the response, so
+	// submitting addresses and watching which ones came back instantly
+	// enumerated the set of feeds this service's users read. Feed contents are
+	// public; who reads them here was not, and on a service small enough to
+	// publish its own account count that narrows towards individuals.
+	//
+	// What it costs to close is one request, once, when somebody adds a feed.
+	// The saving that matters is not this — it is that the feed is then polled
+	// once for everyone who follows it, ninety-six times a day rather than
+	// ninety-six times each, and that is untouched. It also removes a race
+	// worth not having: a lookup that said "known" could be stale by the time
+	// the insert ran, if the last other subscriber left in between.
+	//
+	// Subscribe handles either case; the seed and validators below are used
+	// only if this really is the first subscriber, so there is nothing to check
+	// for here.
+	//
+	// The entries seeded are recorded as seen and delivered nowhere: posting
+	// starts from what appears after this moment, so adding a feed never floods
+	// a timeline. Doing it in the same transaction as the subscription means
+	// there is no window in which an existing entry could be mistaken for a new
+	// one.
+	seed := make([]store.Item, 0, len(res.Entries))
+	for _, e := range res.Entries {
+		seed = append(seed, store.Item{
+			GUID: e.GUID, URL: e.URL, Title: e.Title,
+			Summary: e.Summary, Author: e.Author, PublishedAt: e.Published,
+		})
+	}
+	// The validators from this fetch go with it, so the worker's first poll is a
+	// conditional request rather than a second full download of what was just
+	// read.
+	now := time.Now().UTC()
+	state := store.FetchState{
+		ETag:         res.ETag,
+		LastModified: res.LastModified,
+		BodyHash:     res.BodyHash,
+		NextFetchAt:  now.Add(s.cfg.MinPollInterval),
+	}
+	if _, _, err := s.store.Subscribe(r.Context(), user.ID, feedURL, res.Title, seed, state); err != nil {
 		s.log.Error("save feed", "error", err)
 		s.fail(w, r, http.StatusInternalServerError, "Something went wrong.")
 		return
-	}
-
-	// Prime from the fetch that was just made: every entry the feed already has
-	// is recorded as seen and delivered nowhere. Posting starts from what
-	// appears after this moment, so adding a feed never floods a timeline.
-	// Doing it here rather than waiting for the first poll means there is no
-	// window in which an existing entry could be mistaken for a new one.
-	now := time.Now().UTC()
-	primed, err := feed.Ingest(r.Context(), s.store, f.ID, user.ID, res.Entries, true, s.cfg.MaxItemsPerPoll)
-	if err != nil {
-		s.log.Error("prime feed", "feed", f.ID, "error", err)
-	} else {
-		f.Primed = true
-		s.log.Info("feed primed", "feed", f.ID, "entries", primed.New)
-	}
-
-	f.Title = res.Title
-	f.ETag, f.LastModified = res.ETag, res.LastModified
-	f.LastFetchAt = &now
-	f.NextFetchAt = now.Add(s.cfg.MinPollInterval)
-	if err := s.store.RecordFetch(r.Context(), f); err != nil {
-		s.log.Error("record feed state", "error", err)
 	}
 
 	if discovered {
@@ -196,7 +216,7 @@ func (s *Server) dashboardError(w http.ResponseWriter, r *http.Request, msg, fee
 func (s *Server) handleFeedPause(w http.ResponseWriter, r *http.Request) {
 	user := userFrom(r)
 	pause := r.PostFormValue("paused") == "1"
-	if err := s.store.SetFeedPaused(r.Context(), user.ID, pause); err != nil {
+	if err := s.store.SetSubscriptionPaused(r.Context(), user.ID, pause); err != nil {
 		s.log.Error("pause feed", "error", err)
 	}
 	if pause {
@@ -219,7 +239,14 @@ func (s *Server) handleFeedRefresh(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleFeedDelete(w http.ResponseWriter, r *http.Request) {
-	if err := s.store.DeleteFeed(r.Context(), userFrom(r).ID); err != nil {
+	user := userFrom(r)
+	// Unsubscribing collects orphaned feeds, so it is as much of a write as
+	// adding one. Limiting only the add left save/delete as an unbounded loop.
+	if !s.writeLimit.allow("feed:" + strconv.FormatInt(user.ID, 10)) {
+		s.dashboardError(w, r, "Too many changes. Try again later.", "")
+		return
+	}
+	if err := s.store.Unsubscribe(r.Context(), user.ID); err != nil {
 		s.log.Error("delete feed", "error", err)
 	}
 	redirect(w, r, "/dashboard", "feed-removed")
@@ -227,7 +254,7 @@ func (s *Server) handleFeedDelete(w http.ResponseWriter, r *http.Request) {
 
 // routedDestinations lists the account's destinations, marked with whether the
 // feed publishes to them. With no feed yet, none are marked.
-func (s *Server) routedDestinations(ctx context.Context, userID int64, f *store.Feed) ([]*store.RoutedDestination, error) {
+func (s *Server) routedDestinations(ctx context.Context, userID int64, f *store.FeedView) ([]*store.RoutedDestination, error) {
 	if f != nil {
 		return s.store.DestinationsForFeed(ctx, userID, f.ID)
 	}
@@ -681,6 +708,9 @@ func (s *Server) handleDeliveryRetry(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, http.StatusInternalServerError, "Something went wrong.")
 		return
 	}
+	// The sender idles for minutes at a time now, so tell it rather than
+	// letting somebody watch a spinner until the next tick.
+	s.notify()
 	redirect(w, r, "/dashboard", "retrying")
 }
 
@@ -744,6 +774,11 @@ func (s *Server) handleSettingsSave(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, http.StatusInternalServerError, "Something went wrong.")
 		return
 	}
+	// After the write, not before it. Dropping the entry first leaves a window
+	// in which a concurrent request on the same session re-reads the old row and
+	// caches it for another full TTL — so the page that renders next shows the
+	// value that was just replaced, which is exactly what this is here to stop.
+	s.forgetSession(sessionIDFrom(r))
 	redirect(w, r, "/settings", "settings-saved")
 }
 
@@ -822,6 +857,11 @@ func (s *Server) handleAccountDelete(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, http.StatusInternalServerError, "Something went wrong.")
 		return
 	}
+	// Every session, not just this one: the account may be signed in elsewhere,
+	// and those entries would otherwise resolve to a deleted user for a further
+	// TTL. The database rows are already gone by cascade; this is the cache
+	// catching up.
+	s.forgetUser(user.ID)
 	s.endSession(w, r)
 	redirect(w, r, "/", "account-gone")
 }

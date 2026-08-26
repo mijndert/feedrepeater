@@ -20,7 +20,7 @@ import (
 // queued builds one pending delivery and returns it with the publisher that
 // owns it. Nothing here reaches the network: the interest is in what the retry
 // schedule writes, not in sending.
-func queued(t *testing.T) (*Publisher, *store.Store, *store.Delivery) {
+func queued(t *testing.T) (*Publisher, *store.Store, *store.DueDelivery) {
 	t.Helper()
 	ctx := context.Background()
 
@@ -44,7 +44,7 @@ func queued(t *testing.T) (*Publisher, *store.Store, *store.Delivery) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	f, err := st.SetFeed(ctx, user.ID, "https://example.com/feed.xml")
+	f, _, err := st.Subscribe(ctx, user.ID, "https://example.com/feed.xml", "", nil, store.FetchState{NextFetchAt: time.Now().UTC()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -53,11 +53,11 @@ func queued(t *testing.T) (*Publisher, *store.Store, *store.Delivery) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	item := &store.Item{FeedID: f.ID, GUID: "g1", Title: "An entry", URL: "https://example.com/1"}
+	item := &store.Item{FeedID: f.FeedID, GUID: "g1", Title: "An entry", URL: "https://example.com/1"}
 	if _, err := st.InsertItem(ctx, item); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := st.QueueDeliveries(ctx, user.ID, f.ID, item.ID); err != nil {
+	if _, err := st.QueueDeliveries(ctx, f.FeedID, item.ID); err != nil {
 		t.Fatal(err)
 	}
 	due, err := st.DueDeliveries(ctx, 10)

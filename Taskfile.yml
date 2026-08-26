@@ -138,12 +138,18 @@ tasks:
       - |
         {{.ENV}}
         sqlite3 -header -column "${FR_DB_PATH:-{{.DB}}}" "
-          SELECT f.id, u.acct || '@' || u.host AS account, substr(f.url, 1, 45) AS url,
-                 f.primed, f.paused, f.failures,
-                 datetime(f.last_fetch_at, 'unixepoch') AS last_fetch,
-                 datetime(f.next_fetch_at, 'unixepoch') AS next_fetch,
-                 substr(f.last_error, 1, 40) AS error
-          FROM feeds f JOIN users u ON u.id = f.user_id"
+          SELECT f.id, substr(f.url, 1, 45) AS url,
+                 count(sub.id) AS subs,
+                 sum(sub.paused) AS paused_subs,
+                 st.disabled, st.failures,
+                 datetime(st.last_fetch_at, 'unixepoch') AS last_fetch,
+                 datetime(st.next_fetch_at, 'unixepoch') AS next_fetch,
+                 datetime(st.changed_at, 'unixepoch') AS last_changed,
+                 substr(st.last_error, 1, 40) AS error
+          FROM feeds f
+          JOIN feed_state st ON st.feed_id = f.id
+          LEFT JOIN subscriptions sub ON sub.feed_id = f.id
+          GROUP BY f.id"
 
   db:due:
     desc: Mark the feed due so the next tick polls it
@@ -151,7 +157,7 @@ tasks:
     cmds:
       - |
         {{.ENV}}
-        sqlite3 "${FR_DB_PATH:-{{.DB}}}" "UPDATE feeds SET next_fetch_at = unixepoch()"
+        sqlite3 "${FR_DB_PATH:-{{.DB}}}" "UPDATE feed_state SET next_fetch_at = unixepoch()"
         echo "feeds marked due"
 
   db:reset:

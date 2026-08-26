@@ -7,91 +7,256 @@ import (
 	"time"
 )
 
-// SetFeed installs the user's single feed, replacing any existing one. Changing
-// the URL drops the previously seen entries with it, so the new feed is primed
-// again rather than replayed.
-func (s *Store) SetFeed(ctx context.Context, userID int64, url string) (*Feed, error) {
+// Subscribe attaches an account to the feed at feedURL, replacing whatever it
+// was subscribed to before. It reports whether it had to create the feed.
+//
+// The feed is shared. If somebody already follows this URL the row, its entries
+// and its polling schedule are all already there, so subscribing costs one
+// insert and no request at all — which is the point of the whole arrangement,
+// since the twentieth account to follow a popular blog used to add a twentieth
+// fetch of it every interval.
+//
+// seed and state are only used when this is the first subscriber: the entries
+// and validators the caller already has from the fetch it made to check the
+// address. They are ignored when the feed exists, because it has better ones.
+// The returned flag says which happened, so a caller that expected to join an
+// existing feed and finds it created one instead can go and fetch after all.
+//
+// The watermark is taken inside the transaction. Between reading the entries and
+// writing the subscription there is no moment when the poll loop could ingest
+// the same feed and treat this account as a subscriber entitled to the backlog.
+func (s *Store) Subscribe(ctx context.Context, userID int64, feedURL, title string, seed []Item, state FetchState) (*Subscription, bool, error) {
 	now := time.Now().UTC()
-	var f *Feed
+	sub := &Subscription{UserID: userID, Primed: true, CreatedAt: now}
+	fresh := false
+
 	err := s.tx(ctx, func(tx *sql.Tx) error {
-		if _, err := tx.ExecContext(ctx, `DELETE FROM feeds WHERE user_id = ?`, userID); err != nil {
+		if err := unsubscribe(ctx, tx, userID); err != nil {
 			return err
 		}
-		var id int64
+
+		// The feed may or may not exist. DO NOTHING plus a follow-up read is one
+		// statement more than DO UPDATE and does not touch the row when it is
+		// already there, which matters because every touched row is a page the
+		// replica ships.
+		var feedID int64
 		err := tx.QueryRowContext(ctx, `
-			INSERT INTO feeds (user_id, url, next_fetch_at, created_at)
-			VALUES (?, ?, ?, ?) RETURNING id`,
-			userID, url, now.Unix(), now.Unix()).Scan(&id)
+			INSERT INTO feeds (url, title, created_at) VALUES (?, ?, ?)
+			ON CONFLICT (url) DO NOTHING
+			RETURNING id`, feedURL, title, now.Unix()).Scan(&feedID)
+		fresh = err == nil
+		if errors.Is(err, sql.ErrNoRows) {
+			err = tx.QueryRowContext(ctx, `SELECT id FROM feeds WHERE url = ?`, feedURL).Scan(&feedID)
+		}
 		if err != nil {
 			return err
 		}
-		// A new feed starts connected to everything the account already has, so
-		// the common case needs no routing decisions. Narrowing it is a choice
-		// the user makes afterwards.
-		if _, err := tx.ExecContext(ctx, `
-			INSERT INTO feed_destinations (feed_id, destination_id, user_id, created_at)
-			SELECT ?, d.id, ?, ? FROM destinations d WHERE d.user_id = ?
-			ON CONFLICT DO NOTHING`, id, userID, now.Unix(), userID); err != nil {
+
+		if fresh {
+			if _, err := tx.ExecContext(ctx, `
+				INSERT INTO feed_state (feed_id, etag, last_modified, body_hash, next_fetch_at)
+				VALUES (?, ?, ?, ?, ?)`,
+				feedID, state.ETag, state.LastModified, state.BodyHash,
+				state.NextFetchAt.Unix()); err != nil {
+				return err
+			}
+			for i := range seed {
+				seed[i].FeedID = feedID
+				if _, err := insertItem(ctx, tx, &seed[i]); err != nil {
+					return err
+				}
+			}
+		} else if err := reviveFeed(ctx, tx, feedID, now); err != nil {
 			return err
 		}
 
-		f = &Feed{ID: id, UserID: userID, URL: url, NextFetchAt: now, CreatedAt: now}
-		return nil
+		// Everything recorded so far is this account's history, whether it was
+		// just seeded or has been accumulating for someone else since March.
+		var watermark int64
+		if err := tx.QueryRowContext(ctx,
+			`SELECT coalesce(max(id), 0) FROM items WHERE feed_id = ?`, feedID).Scan(&watermark); err != nil {
+			return err
+		}
+
+		if err := tx.QueryRowContext(ctx, `
+			INSERT INTO subscriptions (user_id, feed_id, prime_item_id, primed, created_at)
+			VALUES (?, ?, ?, 1, ?) RETURNING id`,
+			userID, feedID, watermark, now.Unix()).Scan(&sub.ID); err != nil {
+			return err
+		}
+		sub.FeedID, sub.PrimeItemID = feedID, watermark
+
+		// A new feed starts connected to everything the account already has, so
+		// the common case needs no routing decisions. Narrowing it is a choice
+		// the user makes afterwards.
+		_, err = tx.ExecContext(ctx, `
+			INSERT INTO feed_destinations (feed_id, destination_id, user_id, created_at)
+			SELECT ?, d.id, ?, ? FROM destinations d WHERE d.user_id = ?
+			ON CONFLICT DO NOTHING`, feedID, userID, now.Unix(), userID)
+		return err
 	})
-	return f, err
+	if err != nil {
+		return nil, false, err
+	}
+	return sub, fresh, nil
 }
 
-func (s *Store) FeedByUser(ctx context.Context, userID int64) (*Feed, error) {
-	return s.scanFeed(s.db.QueryRowContext(ctx, feedColumns+` FROM feeds WHERE user_id = ?`, userID))
-}
-
-// FeedByID looks up a feed scoped to its owner.
-func (s *Store) FeedByID(ctx context.Context, userID, id int64) (*Feed, error) {
-	return s.scanFeed(s.db.QueryRowContext(ctx, feedColumns+` FROM feeds WHERE id = ? AND user_id = ?`, id, userID))
-}
-
-func (s *Store) DeleteFeed(ctx context.Context, userID int64) error {
-	_, err := s.db.ExecContext(ctx, `DELETE FROM feeds WHERE user_id = ?`, userID)
+// reviveFeed clears the dead-feed rule when somebody subscribes afresh.
+//
+// Nothing else ever clears it. When a feed belonged to one account, stopping it
+// and pausing it were the same column, so the dashboard's Resume button was the
+// way back and the rule healed itself. Now that stopping is a property of the
+// shared document, a feed with two subscribers survives either of them leaving,
+// and re-adding it would rejoin the same permanently stopped row — a popular
+// blog with a fortnight's outage would be unreachable for everyone, for good,
+// without direct SQL.
+//
+// A new subscriber is a fresh assertion that the URL is worth reading, so it is
+// the right moment to try again. The schedule is pulled in but never pushed
+// out: a feed already due sooner is due for a reason.
+//
+// last_error is deliberately left alone. This is the one write in the design
+// that reaches across accounts, and clearing the message would take an existing
+// subscriber's explanation away on an action they took no part in and cannot
+// see — their dashboard would go from "Stopped after repeated failures", with
+// the reason, to a confident "Active" for a feed that has not actually
+// succeeded at anything yet. The message stays until a fetch clears it, which
+// RecordFetch does on the first success. Until then the dashboard reads
+// "Failing", which is the truth.
+//
+// The guard is what keeps this from being a general force-poll button reachable
+// by anyone: a healthy feed matches neither condition, so its schedule cannot be
+// pulled forward by a stranger subscribing.
+func reviveFeed(ctx context.Context, tx *sql.Tx, feedID int64, now time.Time) error {
+	_, err := tx.ExecContext(ctx, `
+		UPDATE feed_state
+		SET disabled = 0, failures = 0, failing_since = NULL,
+			next_fetch_at = min(next_fetch_at, ?)
+		WHERE feed_id = ? AND (disabled = 1 OR failures > 0)`, now.Unix(), feedID)
 	return err
 }
 
-func (s *Store) SetFeedPaused(ctx context.Context, userID int64, paused bool) error {
-	_, err := s.db.ExecContext(ctx, `UPDATE feeds SET paused = ? WHERE user_id = ?`, boolInt(paused), userID)
+const feedViewColumns = `
+	SELECT sub.id, f.id, sub.user_id, f.url, f.title, sub.paused, st.disabled, sub.primed,
+		st.next_fetch_at, st.last_fetch_at, st.changed_at, st.last_error, st.failures, sub.created_at,
+		(SELECT count(*) FROM subscriptions x WHERE x.feed_id = f.id)
+	FROM subscriptions sub
+	JOIN feeds f ON f.id = sub.feed_id
+	JOIN feed_state st ON st.feed_id = f.id`
+
+// FeedByUser returns the account's feed as the dashboard shows it.
+func (s *Store) FeedByUser(ctx context.Context, userID int64) (*FeedView, error) {
+	return scanFeedView(s.ro.QueryRowContext(ctx, feedViewColumns+` WHERE sub.user_id = ?`, userID))
+}
+
+func scanFeedView(row *sql.Row) (*FeedView, error) {
+	var v FeedView
+	var paused, disabled, primed int
+	var next, created int64
+	var last, changed sql.NullInt64
+	err := row.Scan(&v.SubscriptionID, &v.ID, &v.UserID, &v.URL, &v.Title, &paused, &disabled, &primed,
+		&next, &last, &changed, &v.LastError, &v.Failures, &created, &v.Subscribers)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	v.Paused, v.Disabled, v.Primed = paused == 1, disabled == 1, primed == 1
+	v.NextFetchAt = time.Unix(next, 0).UTC()
+	v.CreatedAt = time.Unix(created, 0).UTC()
+	v.LastFetchAt, v.ChangedAt = scanTime(last), scanTime(changed)
+	return &v, nil
+}
+
+// Unsubscribe drops the account's subscription and, if it was the last one, the
+// feed itself.
+func (s *Store) Unsubscribe(ctx context.Context, userID int64) error {
+	return s.tx(ctx, func(tx *sql.Tx) error { return unsubscribe(ctx, tx, userID) })
+}
+
+// unsubscribe removes one account's link to its feed and collects the feed if
+// nobody else is left. It runs inside the caller's transaction because a feed
+// that briefly has no subscribers and is not yet deleted would be polled for
+// nobody, and one that is deleted while another account still holds a route
+// would take that account's history with it.
+func unsubscribe(ctx context.Context, tx *sql.Tx, userID int64) error {
+	var feedID int64
+	err := tx.QueryRowContext(ctx,
+		`DELETE FROM subscriptions WHERE user_id = ? RETURNING feed_id`, userID).Scan(&feedID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	// Routes are per account, so only this account's go.
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM feed_destinations WHERE feed_id = ? AND user_id = ?`, feedID, userID); err != nil {
+		return err
+	}
+	// The feed, its state and its entries go with the last subscriber. Anything
+	// else is a document nobody reads being polled forever.
+	return deleteOrphanFeeds(ctx, tx)
+}
+
+// SetSubscriptionPaused pauses or resumes one account's subscription. A feed
+// every subscriber has paused stops being polled; one that another account
+// still wants keeps going, and this account simply stops receiving it.
+func (s *Store) SetSubscriptionPaused(ctx context.Context, userID int64, paused bool) error {
+	_, err := s.rw.ExecContext(ctx,
+		`UPDATE subscriptions SET paused = ? WHERE user_id = ?`, boolInt(paused), userID)
 	return err
 }
 
-// FetchNow schedules the user's feed for immediate polling.
+// FetchNow schedules the account's feed for immediate polling.
+//
+// The feed is shared, so this pulls it forward for every subscriber. That is
+// harmless — it is one fetch either way — but it is also why the button is rate
+// limited per account rather than per feed.
 func (s *Store) FetchNow(ctx context.Context, userID int64) error {
-	_, err := s.db.ExecContext(ctx,
-		`UPDATE feeds SET next_fetch_at = ? WHERE user_id = ?`, time.Now().UTC().Unix(), userID)
+	_, err := s.rw.ExecContext(ctx, `
+		UPDATE feed_state SET next_fetch_at = ?
+		WHERE feed_id = (SELECT feed_id FROM subscriptions WHERE user_id = ?)
+		  AND next_fetch_at > ?`,
+		time.Now().UTC().Unix(), userID, time.Now().UTC().Unix())
 	return err
 }
 
-// DueFeed is a feed that is ready to be polled, along with whether anything
-// is currently subscribed to it.
+// DueFeed is a feed ready to be polled.
 type DueFeed struct {
-	*Feed
-	// HasRoutes reports whether at least one unpaused destination receives
-	// this feed. One that delivers nowhere is still recorded, but nothing is
-	// waiting on it, so it can be polled far less often.
+	Feed
+	FetchState
+	// HasRoutes reports whether any live subscription actually leads somewhere.
+	// A feed whose subscribers have all unticked their destinations is still
+	// recorded, but nobody is waiting on it, so it is polled far less often.
 	HasRoutes bool
 }
 
-// DueFeeds returns active feeds whose next fetch time has passed, soonest
-// first.
+// DueFeeds returns feeds whose next fetch time has passed, soonest first.
+//
+// A feed with no unpaused subscription is not returned at all. Under the old
+// per-account rows a paused feed was simply a paused row; now the question is
+// whether anyone at all still wants the document, and if nobody does there is
+// nothing to fetch it for.
 func (s *Store) DueFeeds(ctx context.Context, limit int) ([]*DueFeed, error) {
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT f.id, f.user_id, f.url, f.title, f.etag, f.last_modified, f.primed, f.paused,
-			f.next_fetch_at, f.last_fetch_at, f.changed_at, f.last_error, f.failures, f.created_at,
+	now := time.Now().UTC().Unix()
+	rows, err := s.ro.QueryContext(ctx, `
+		SELECT f.id, f.url, f.title, f.created_at,
+			st.etag, st.last_modified, st.body_hash, st.next_fetch_at, st.last_fetch_at,
+			st.changed_at, st.last_error, st.failures, st.failing_since, st.disabled,
 			EXISTS (
-				SELECT 1 FROM feed_destinations fd
-				JOIN destinations d ON d.id = fd.destination_id AND d.user_id = fd.user_id
-				WHERE fd.feed_id = f.id AND d.paused = 0
+				SELECT 1 FROM subscriptions sub
+				JOIN feed_destinations fd ON fd.feed_id = sub.feed_id AND fd.user_id = sub.user_id
+				JOIN destinations d ON d.id = fd.destination_id AND d.paused = 0
+				WHERE sub.feed_id = f.id AND sub.paused = 0
 			) AS has_routes
-		FROM feeds f
-		WHERE f.paused = 0 AND f.next_fetch_at <= ?
-		ORDER BY f.next_fetch_at
-		LIMIT ?`, time.Now().UTC().Unix(), limit)
+		FROM feed_state st
+		JOIN feeds f ON f.id = st.feed_id
+		WHERE st.disabled = 0 AND st.next_fetch_at <= ?
+		  AND EXISTS (SELECT 1 FROM subscriptions sub WHERE sub.feed_id = f.id AND sub.paused = 0)
+		ORDER BY st.next_fetch_at
+		LIMIT ?`, now, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -99,107 +264,90 @@ func (s *Store) DueFeeds(ctx context.Context, limit int) ([]*DueFeed, error) {
 
 	var out []*DueFeed
 	for rows.Next() {
-		var f Feed
-		var primed, paused, hasRoutes int
-		var next, created int64
-		var last, changed sql.NullInt64
-		if err := rows.Scan(&f.ID, &f.UserID, &f.URL, &f.Title, &f.ETag, &f.LastModified,
-			&primed, &paused, &next, &last, &changed, &f.LastError, &f.Failures, &created,
+		var d DueFeed
+		var hasRoutes, disabled int
+		var created, next int64
+		var last, changed, failingSince sql.NullInt64
+		if err := rows.Scan(&d.Feed.ID, &d.URL, &d.Title, &created,
+			&d.ETag, &d.LastModified, &d.BodyHash, &next, &last,
+			&changed, &d.LastError, &d.Failures, &failingSince, &disabled,
 			&hasRoutes); err != nil {
 			return nil, err
 		}
-		f.Primed, f.Paused = primed == 1, paused == 1
-		f.NextFetchAt = time.Unix(next, 0).UTC()
-		f.CreatedAt = time.Unix(created, 0).UTC()
-		f.LastFetchAt = scanTime(last)
-		f.ChangedAt = scanTime(changed)
-		out = append(out, &DueFeed{Feed: &f, HasRoutes: hasRoutes == 1})
-	}
-	return out, rows.Err()
-}
-
-// FeedOwner pairs a feed with its owner, for housekeeping loops.
-type FeedOwner struct {
-	FeedID int64
-	UserID int64
-}
-
-// AllFeedIDs lists every feed and its owner.
-func (s *Store) AllFeedIDs(ctx context.Context) ([]FeedOwner, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, user_id FROM feeds`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []FeedOwner
-	for rows.Next() {
-		var f FeedOwner
-		if err := rows.Scan(&f.FeedID, &f.UserID); err != nil {
-			return nil, err
-		}
-		out = append(out, f)
+		d.FeedID = d.Feed.ID
+		d.FailingSince = scanTime(failingSince)
+		d.Disabled = disabled == 1
+		d.Feed.CreatedAt = time.Unix(created, 0).UTC()
+		d.NextFetchAt = time.Unix(next, 0).UTC()
+		d.LastFetchAt, d.ChangedAt = scanTime(last), scanTime(changed)
+		d.HasRoutes = hasRoutes == 1
+		out = append(out, &d)
 	}
 	return out, rows.Err()
 }
 
 // RecordFetch stores the outcome of a poll and the next time to try.
 //
-// paused is deliberately not among the columns written. It belongs to the
-// account, not to the fetch: the worker reads a feed, spends up to a minute
-// fetching it, and writing back the value it read would revert a pause clicked
-// inside that window — the dashboard says "Feed paused" and the feed keeps
-// posting. The one case where a poll does pause a feed is the dead-feed rule,
-// which goes through PauseFeed.
-func (s *Store) RecordFetch(ctx context.Context, f *Feed) error {
-	_, err := s.db.ExecContext(ctx, `
-		UPDATE feeds SET title = ?, etag = ?, last_modified = ?, primed = ?,
-			next_fetch_at = ?, last_fetch_at = ?, changed_at = ?, last_error = ?, failures = ?
-		WHERE id = ?`,
-		f.Title, f.ETag, f.LastModified, boolInt(f.Primed),
-		f.NextFetchAt.Unix(), nullTime(f.LastFetchAt), nullTime(f.ChangedAt),
-		f.LastError, f.Failures, f.ID)
+// It writes feed_state and nothing else. `disabled` is deliberately not among
+// the columns: the worker reads a feed, spends up to a minute fetching it, and
+// writing back the value it read would revert a decision made inside that
+// window. The one case where a poll does stop a feed is the dead-feed rule,
+// which goes through DisableFeed.
+func (s *Store) RecordFetch(ctx context.Context, st *FetchState) error {
+	_, err := s.rw.ExecContext(ctx, `
+		UPDATE feed_state SET etag = ?, last_modified = ?, body_hash = ?,
+			next_fetch_at = ?, last_fetch_at = ?, changed_at = ?, last_error = ?,
+			failures = ?, failing_since = ?
+		WHERE feed_id = ?`,
+		st.ETag, st.LastModified, st.BodyHash,
+		st.NextFetchAt.Unix(), nullTime(st.LastFetchAt), nullTime(st.ChangedAt),
+		st.LastError, st.Failures, nullTime(st.FailingSince), st.FeedID)
 	return err
 }
 
-// PauseFeed pauses one feed by id, for the worker's dead-feed rule. The
-// dashboard's own pause is SetFeedPaused, which is scoped by owner; this one is
-// reached from the poll loop, which has no request and no session behind it.
-func (s *Store) PauseFeed(ctx context.Context, id int64) error {
-	_, err := s.db.ExecContext(ctx, `UPDATE feeds SET paused = 1 WHERE id = ?`, id)
+// SetFeedTitle records a feed's title when it changes.
+//
+// Split out of RecordFetch on purpose. The title changes once in a feed's life
+// and the fetch state changes every poll, so writing them together would put
+// the feeds table back in the path of every fetch — which is the page churn
+// splitting the tables was meant to remove.
+func (s *Store) SetFeedTitle(ctx context.Context, feedID int64, title string) error {
+	_, err := s.rw.ExecContext(ctx,
+		`UPDATE feeds SET title = ? WHERE id = ? AND title <> ?`, title, feedID, title)
 	return err
 }
 
-const feedColumns = `SELECT id, user_id, url, title, etag, last_modified, primed, paused,
-	next_fetch_at, last_fetch_at, changed_at, last_error, failures, created_at`
-
-type rowScanner interface {
-	Scan(dest ...any) error
+// DeferFeeds pushes a set of feeds out to a later time, in one statement.
+//
+// This is the poll loop putting back the feeds it could not take this round
+// because their host had just been contacted. Leaving them where they were made
+// them the soonest-due feeds on the next tick as well, so they were selected,
+// skipped and reselected indefinitely, holding a slot in every batch and
+// keeping whatever was behind them from ever being reached.
+func (s *Store) DeferFeeds(ctx context.Context, feedIDs []int64, until time.Time) error {
+	if len(feedIDs) == 0 {
+		return nil
+	}
+	args := make([]any, 0, len(feedIDs)+1)
+	args = append(args, until.Unix())
+	for _, id := range feedIDs {
+		args = append(args, id)
+	}
+	// Never pull a feed forward: one already due sooner than this is due for a
+	// reason, and a deferral is about relieving a host rather than about it.
+	_, err := s.rw.ExecContext(ctx, `
+		UPDATE feed_state SET next_fetch_at = ?
+		WHERE feed_id IN (`+placeholders(len(feedIDs))+`) AND next_fetch_at < ?`,
+		append(args, until.Unix())...)
+	return err
 }
 
-func (s *Store) scanFeed(row *sql.Row) (*Feed, error) {
-	f, err := s.scanFeedRows(row)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, ErrNotFound
-	}
-	return f, err
-}
-
-func (s *Store) scanFeedRows(r rowScanner) (*Feed, error) {
-	var f Feed
-	var primed, paused int
-	var next, created int64
-	var last, changed sql.NullInt64
-	err := r.Scan(&f.ID, &f.UserID, &f.URL, &f.Title, &f.ETag, &f.LastModified, &primed, &paused,
-		&next, &last, &changed, &f.LastError, &f.Failures, &created)
-	if err != nil {
-		return nil, err
-	}
-	f.Primed, f.Paused = primed == 1, paused == 1
-	f.NextFetchAt = time.Unix(next, 0).UTC()
-	f.CreatedAt = time.Unix(created, 0).UTC()
-	f.LastFetchAt = scanTime(last)
-	f.ChangedAt = scanTime(changed)
-	return &f, nil
+// DisableFeed stops a feed being polled, for the worker's dead-feed rule. It
+// applies to every subscriber, which is correct: the document is gone, not one
+// account's interest in it.
+func (s *Store) DisableFeed(ctx context.Context, feedID int64) error {
+	_, err := s.rw.ExecContext(ctx, `UPDATE feed_state SET disabled = 1 WHERE feed_id = ?`, feedID)
+	return err
 }
 
 // --- Items -----------------------------------------------------------------
@@ -207,7 +355,17 @@ func (s *Store) scanFeedRows(r rowScanner) (*Feed, error) {
 // InsertItem records an entry. It reports whether the row was new; a duplicate
 // GUID is a no-op, which is what stops an entry being posted twice.
 func (s *Store) InsertItem(ctx context.Context, it *Item) (bool, error) {
-	err := s.db.QueryRowContext(ctx, `
+	return insertItem(ctx, s.rw, it)
+}
+
+// execQuerier is the part of *sql.DB and *sql.Tx that insertItem needs, so the
+// same statement serves a standalone insert and one inside a batch.
+type execQuerier interface {
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
+func insertItem(ctx context.Context, q execQuerier, it *Item) (bool, error) {
+	err := q.QueryRowContext(ctx, `
 		INSERT INTO items (feed_id, guid, url, title, summary, author, published_at, seen_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT (feed_id, guid) DO NOTHING
@@ -223,33 +381,24 @@ func (s *Store) InsertItem(ctx context.Context, it *Item) (bool, error) {
 	return true, nil
 }
 
-func (s *Store) ItemByID(ctx context.Context, id int64) (*Item, error) {
-	var it Item
-	var published sql.NullInt64
-	var seen int64
-	err := s.db.QueryRowContext(ctx, `
-		SELECT id, feed_id, guid, url, title, summary, author, published_at, seen_at
-		FROM items WHERE id = ?`, id).
-		Scan(&it.ID, &it.FeedID, &it.GUID, &it.URL, &it.Title, &it.Summary, &it.Author, &published, &seen)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, ErrNotFound
-	}
+// TrimItems keeps the most recent n entries of every feed in one statement.
+//
+// It used to be a query per feed, issued from a loop over every feed in the
+// database once an hour, and almost all of them had nothing to delete. The
+// window function does the same work in a single pass, so the cost tracks the
+// number of feeds over the retention rather than the number of feeds at all.
+func (s *Store) TrimItems(ctx context.Context, keep int) (int64, error) {
+	res, err := s.rw.ExecContext(ctx, `
+		DELETE FROM items WHERE id IN (
+			SELECT id FROM (
+				SELECT id, row_number() OVER (PARTITION BY feed_id ORDER BY id DESC) AS rn
+				FROM items
+			) WHERE rn > ?
+		)`, keep)
 	if err != nil {
-		return nil, err
+		return 0, err
 	}
-	it.PublishedAt = scanTime(published)
-	it.SeenAt = time.Unix(seen, 0).UTC()
-	return &it, nil
-}
-
-// TrimItems keeps the most recent n entries per feed so the database does not
-// grow without bound.
-func (s *Store) TrimItems(ctx context.Context, feedID int64, keep int) error {
-	_, err := s.db.ExecContext(ctx, `
-		DELETE FROM items WHERE feed_id = ? AND id NOT IN (
-			SELECT id FROM items WHERE feed_id = ? ORDER BY id DESC LIMIT ?
-		)`, feedID, feedID, keep)
-	return err
+	return res.RowsAffected()
 }
 
 func boolInt(b bool) int {

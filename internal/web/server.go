@@ -5,6 +5,7 @@ package web
 import (
 	"context"
 	"embed"
+	"fmt"
 	"html/template"
 	"io/fs"
 	"log/slog"
@@ -45,6 +46,16 @@ type Server struct {
 	log      *slog.Logger
 
 	templates map[string]*template.Template
+	assets    *assets
+
+	// notify wakes the delivery loop when a handler queues something, so a
+	// retry goes out at once instead of waiting for a timer.
+	notify func()
+
+	// sessions memoises session lookups. Resolving one is a query on every
+	// authenticated request, and the answer only changes when somebody signs in
+	// or out — see sessionCacheTTL.
+	sessions sync.Map
 
 	loginLimit *limiter // per client address, for sign-in attempts
 	writeLimit *limiter // per user, for actions that reach third parties
@@ -52,9 +63,19 @@ type Server struct {
 	startedAt time.Time
 
 	// /stats is public and its counts are recomputed at most once per statsTTL.
-	statsMu   sync.Mutex
-	statsBody []byte
-	statsAt   time.Time
+	statsMu      sync.Mutex
+	statsBody    []byte
+	statsAt      time.Time
+	statsRefresh bool
+	// statsWait is closed when the in-flight compute finishes, so a caller with
+	// nothing worth serving can wait for it instead of starting a second one.
+	statsWait chan struct{}
+
+	// healthz is answered from a cached probe rather than a live one, so a
+	// check every thirty seconds does not take a database connection with it.
+	healthMu sync.Mutex
+	healthAt time.Time
+	healthOK bool
 }
 
 type Deps struct {
@@ -66,6 +87,9 @@ type Deps struct {
 	Fetcher   *feed.Fetcher
 	Publisher *publisher.Publisher
 	Logger    *slog.Logger
+	// Notify wakes the delivery worker. Optional: a server built without one
+	// still works, the queue is just drained on its own schedule.
+	Notify func()
 }
 
 func NewServer(d Deps) (*Server, error) {
@@ -81,6 +105,18 @@ func NewServer(d Deps) (*Server, error) {
 		loginLimit: newLimiter(10, time.Hour),
 		writeLimit: newLimiter(30, time.Hour),
 		startedAt:  time.Now(),
+		notify:     d.Notify,
+	}
+	if s.notify == nil {
+		s.notify = func() {}
+	}
+
+	static, err := fs.Sub(staticFS, "static")
+	if err != nil {
+		return nil, err
+	}
+	if s.assets, err = loadAssets(static); err != nil {
+		return nil, fmt.Errorf("load static assets: %w", err)
 	}
 	if err := s.parseTemplates(); err != nil {
 		return nil, err
@@ -92,8 +128,7 @@ func NewServer(d Deps) (*Server, error) {
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 
-	static, _ := fs.Sub(staticFS, "static")
-	mux.Handle("GET /static/", http.StripPrefix("/static/", staticCache(http.FileServerFS(static))))
+	mux.Handle("GET /static/", s.assets.handler())
 
 	mux.HandleFunc("GET /{$}", s.handleIndex)
 	mux.HandleFunc("GET /healthz", s.handleHealth)
@@ -151,6 +186,21 @@ func (s *Server) Serve(ctx context.Context) error {
 	}
 	s.log.Info("listening", "addr", ln.Addr().String(), "base_url", s.cfg.BaseURL.String())
 
+	// The session cache expires entries lazily, so one that is never asked
+	// about again is never dropped. This is what actually collects them.
+	go func() {
+		t := time.NewTicker(sessionCacheTTL * 10)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				s.sweepSessions()
+			}
+		}
+	}()
+
 	errc := make(chan error, 1)
 	go func() { errc <- srv.Serve(ln) }()
 
@@ -164,20 +214,50 @@ func (s *Server) Serve(ctx context.Context) error {
 	}
 }
 
+// healthTTL is how long a health probe is reused.
+//
+// The container health check runs every thirty seconds for the life of the
+// process and each run took a connection from the writer pool — which is one
+// connection wide, so it queued behind whatever was writing and everything else
+// queued behind it. Probing at most once every few seconds answers the question
+// the check is actually asking, which is whether the process is up and the file
+// is reachable, not whether it is reachable at this exact instant.
+const healthTTL = 5 * time.Second
+
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
-	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
-	defer cancel()
-	if err := s.store.DB().PingContext(ctx); err != nil {
+	if !s.healthy(r.Context()) {
 		http.Error(w, "unavailable", http.StatusServiceUnavailable)
 		return
 	}
-	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	h := w.Header()
+	h.Set("Content-Type", "text/plain; charset=utf-8")
+	h.Set("Cache-Control", "no-store")
 	w.Write([]byte("ok\n"))
 }
 
-func staticCache(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Cache-Control", "public, max-age=3600")
-		next.ServeHTTP(w, r)
-	})
+func (s *Server) healthy(ctx context.Context) bool {
+	s.healthMu.Lock()
+	defer s.healthMu.Unlock()
+	if time.Since(s.healthAt) < healthTTL {
+		return s.healthOK
+	}
+	// WithoutCancel, because the caller's context is the wrong lifetime for
+	// this. The container check runs with its own timeout, and a client that
+	// hangs up cancels r.Context() — which would make Ping return
+	// context.Canceled and latch a 503 into the cache for the next five
+	// seconds, from a database that was never unhealthy. That is a plausible
+	// way to earn a restart loop out of nothing.
+	probe, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
+	defer cancel()
+	ok := s.store.DB().PingContext(probe) == nil
+
+	// Only a success is cached. A failure is the answer worth re-asking: it is
+	// the state that changes on its own, and the state where being wrong for
+	// five seconds costs the most.
+	if ok {
+		s.healthOK, s.healthAt = true, time.Now()
+	} else {
+		s.healthOK, s.healthAt = false, time.Time{}
+	}
+	return ok
 }

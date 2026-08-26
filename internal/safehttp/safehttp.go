@@ -136,12 +136,22 @@ func New(opts Options) *Client {
 		}
 	}
 
+	// Connection reuse is the single largest cost in polling, and the defaults
+	// are sized for a client that talks to a handful of hosts. This one talks to
+	// as many hosts as there are feeds: at 32 idle connections a busy cycle
+	// evicts each one long before the same feed comes round again, so nearly
+	// every fetch paid for a fresh TCP connection and a TLS handshake — far more
+	// CPU and latency than reading the 304 it was going for.
+	//
+	// Two per host is right and stays: polls of one host are spaced deliberately
+	// (see the worker), so a third concurrent connection to it would mean the
+	// spacing had already failed. What was wrong was the total.
 	transport := &http.Transport{
 		DialContext:           dialer.DialContext,
 		ForceAttemptHTTP2:     true,
-		MaxIdleConns:          32,
+		MaxIdleConns:          256,
 		MaxIdleConnsPerHost:   2,
-		IdleConnTimeout:       60 * time.Second,
+		IdleConnTimeout:       5 * time.Minute,
 		TLSHandshakeTimeout:   10 * time.Second,
 		ExpectContinueTimeout: time.Second,
 		DisableCompression:    false,
@@ -301,6 +311,19 @@ func (c *Client) Get(ctx context.Context, rawURL string) (*http.Response, error)
 // an endless stream fails loudly.
 func (c *Client) ReadBody(resp *http.Response) ([]byte, error) {
 	return ReadLimited(resp.Body, c.maxBytes)
+}
+
+// ReadLimited reads a response under a cap tighter than the client's own.
+//
+// The client-wide limit has to accommodate the largest thing anything asks for,
+// which is an instance API answering a verification call. A feed does not need
+// that much room, and the caller that knows it should say so: the cap is what
+// bounds the allocation a parse turns the bytes into.
+func (c *Client) ReadLimited(resp *http.Response, max int64) ([]byte, error) {
+	if max <= 0 || max > c.maxBytes {
+		max = c.maxBytes
+	}
+	return ReadLimited(resp.Body, max)
 }
 
 // ReadLimited reads up to max bytes, erroring if there is more.
