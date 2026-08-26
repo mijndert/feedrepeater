@@ -4,7 +4,7 @@
 # toolchain cross-compiles for free, so building an arm64 image on an amd64
 # runner costs nothing; letting this stage run as arm64 instead would compile
 # the whole module under QEMU for no gain.
-FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS build
+FROM --platform=$BUILDPLATFORM golang:1.27-alpine AS build
 WORKDIR /src
 
 # Dependencies first, so a source-only change reuses this layer.
