@@ -508,11 +508,14 @@ label.item-sub { cursor: pointer; }
   white-space: nowrap;
   font-variant-numeric: tabular-nums;
 }
-/* Retry sits in the same column as the timestamp, so it stays out of the way
-   until a delivery has failed and there is something to press. */
-.event-when button {
+/* Retry sits on the line of the destination that failed. A row is one entry
+   and can carry a line per destination, so the timestamp column no longer knows
+   which of them a button beside it would retry. */
+.event-sub form { display: inline; }
+.event-sub button {
   font-size: .78rem;
   padding: .15rem .45rem;
+  margin-left: .35rem;
 }
 
 .pip {

@@ -1699,3 +1699,85 @@ func TestLimiterCeilingRecoversAsWindowsExpire(t *testing.T) {
 		t.Errorf("expired entries were not swept: %d remain", len(l.seen))
 	}
 }
+
+// --- activity --------------------------------------------------------------
+
+func deliveryRow(id, item int64, status string, updated time.Time) *store.DeliveryView {
+	v := &store.DeliveryView{}
+	v.ID, v.ItemID, v.Status, v.UpdatedAt = id, item, status, updated
+	return v
+}
+
+// One entry posted to several destinations is one line, however many rows the
+// deliveries table holds for it.
+func TestGroupActivityFoldsDeliveriesIntoEntries(t *testing.T) {
+	now := time.Now().UTC()
+	rows := []*store.DeliveryView{
+		deliveryRow(4, 2, "pending", now),
+		deliveryRow(3, 2, "sent", now.Add(-time.Minute)),
+		deliveryRow(2, 1, "failed", now.Add(-time.Hour)),
+		deliveryRow(1, 1, "sent", now.Add(-2*time.Hour)),
+	}
+
+	entries, more := groupActivity(rows, false)
+	if more {
+		t.Error("a short read reported truncated history")
+	}
+	if len(entries) != 2 {
+		t.Fatalf("grouped %d entries, want 2", len(entries))
+	}
+	if entries[0].ItemID != 2 || len(entries[0].Deliveries) != 2 {
+		t.Errorf("first entry is item %d with %d deliveries, want item 2 with 2",
+			entries[0].ItemID, len(entries[0].Deliveries))
+	}
+	// The line's own state is the worst of the deliveries under it, and its
+	// time is the most recent attempt among them rather than the oldest row.
+	if got := entries[0].Status(); got != "pending" {
+		t.Errorf("entry with a pending delivery reads %q, want pending", got)
+	}
+	if got := entries[1].Status(); got != "failed" {
+		t.Errorf("entry with a failed delivery reads %q, want failed", got)
+	}
+	if !entries[0].UpdatedAt.Equal(now) {
+		t.Errorf("entry time is %v, want the newest attempt %v", entries[0].UpdatedAt, now)
+	}
+}
+
+// A read that hit its row limit may have cut its oldest entry in half, so that
+// entry is dropped rather than shown as having gone to fewer destinations than
+// it did.
+func TestGroupActivityDropsThePossiblyIncompleteTail(t *testing.T) {
+	now := time.Now().UTC()
+	rows := []*store.DeliveryView{
+		deliveryRow(3, 2, "sent", now),
+		deliveryRow(2, 1, "sent", now.Add(-time.Hour)),
+	}
+	entries, more := groupActivity(rows, true)
+	if len(entries) != 1 || entries[0].ItemID != 2 {
+		t.Fatalf("kept %d entries, want only the complete one", len(entries))
+	}
+	if !more {
+		t.Error("truncated history was not reported as truncated")
+	}
+}
+
+// The cap counts entries, so a busy feed on a well-connected account cannot
+// push everything else off the list with one afternoon's deliveries.
+func TestGroupActivityCapsEntriesNotDeliveries(t *testing.T) {
+	now := time.Now().UTC()
+	var rows []*store.DeliveryView
+	id := int64(activityRows)
+	for item := int64(1); item <= int64(activityEntries)+3; item++ {
+		for range 3 {
+			rows = append(rows, deliveryRow(id, item, "sent", now))
+			id--
+		}
+	}
+	entries, more := groupActivity(rows, false)
+	if len(entries) != activityEntries {
+		t.Errorf("kept %d entries, want the cap of %d", len(entries), activityEntries)
+	}
+	if !more {
+		t.Error("a capped list did not report there was more")
+	}
+}

@@ -109,37 +109,36 @@
 <section>
   <h2>Activity</h2>
   {{if $d.Pending}}<p class="hint">{{$d.Pending}} waiting to go out.</p>{{end}}
-  {{if $d.Deliveries}}
+  {{if $d.Activity}}
     <ul class="events">
-      {{range $d.Deliveries}}
+      {{range $d.Activity}}
         <li>
           <div>
             <div class="event-title">
-              {{if .ItemURL}}<a href="{{.ItemURL}}" rel="noreferrer nofollow">{{.ItemTitle}}</a>{{else}}{{.ItemTitle}}{{end}}
-            </div>
-            <div class="event-sub">
               <span class="pip pip-{{.Status}}"></span>
-              {{if eq .Status "sent"}}
-                Posted to {{.DestinationName}}{{if .RemoteURL}} · <a href="{{.RemoteURL}}" rel="noreferrer nofollow">View</a>{{end}}
-              {{else if eq .Status "failed"}}
-                {{.DestinationName}} refused it{{if .LastError}} — {{.LastError}}{{end}}
-              {{else}}
-                Waiting to send to {{.DestinationName}}
-              {{end}}
+              {{if .URL}}<a href="{{.URL}}" rel="noreferrer nofollow">{{.Title}}</a>{{else}}{{.Title}}{{end}}
             </div>
-          </div>
-          <div class="event-when">
-            {{ago .UpdatedAt}}
-            {{if eq .Status "failed"}}
-              <form method="post" action="/deliveries/{{.ID}}/retry">
-                <input type="hidden" name="csrf" value="{{$.CSRF}}">
-                <button type="submit" class="quiet">Retry</button>
-              </form>
+            {{range .Deliveries}}
+              <div class="event-sub">
+                {{if eq .Status "sent"}}
+                  Posted to {{.DestinationName}}{{if .RemoteURL}} · <a href="{{.RemoteURL}}" rel="noreferrer nofollow">View</a>{{end}}
+                {{else if eq .Status "failed"}}
+                  <span class="bad">{{.DestinationName}} refused it</span>{{if .LastError}} — {{.LastError}}{{end}}
+                  <form method="post" action="/deliveries/{{.ID}}/retry">
+                    <input type="hidden" name="csrf" value="{{$.CSRF}}">
+                    <button type="submit" class="quiet">Retry</button>
+                  </form>
+                {{else}}
+                  Waiting to send to {{.DestinationName}}
+                {{end}}
+              </div>
             {{end}}
           </div>
+          <div class="event-when">{{ago .UpdatedAt}}</div>
         </li>
       {{end}}
     </ul>
+    {{if $d.ActivityMore}}<p class="hint">Older entries are not shown.</p>{{end}}
   {{else}}
     <p>Nothing posted yet.</p>
   {{end}}

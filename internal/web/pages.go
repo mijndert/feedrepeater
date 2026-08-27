@@ -21,10 +21,100 @@ type dashboardData struct {
 	// Destinations carries every destination the account owns, each marked
 	// with whether the feed publishes to it.
 	Destinations []*store.RoutedDestination
-	Deliveries   []*store.DeliveryView
+	// Activity is delivery history folded into one line per entry.
+	Activity []activityEntry
+	// ActivityMore says history was cut off, so the list can admit it rather
+	// than looking like everything there is.
+	ActivityMore bool
 	Pending      int
 	Kinds        []destination.Kind
 	Interval     string
+}
+
+// The activity list is capped in entries, not deliveries.
+//
+// One entry going to seven destinations is seven rows in the table and one line
+// here. Counting rows meant a well-connected account watching a busy feed saw a
+// list that was four entries deep and twenty-five lines long: every service
+// repeated under every title, and yesterday already off the bottom. Counting
+// entries makes the length of the list a number of things that happened.
+//
+// activityRows is what is read to build them — enough for the cap even when
+// every entry went everywhere, with room for the trailing group that gets
+// dropped below.
+const activityEntries = 10
+
+// Kinds is a slice, so this is a var rather than a const; it is fixed at start
+// and never written.
+var activityRows = activityEntries*len(destination.Kinds) + 10
+
+// activityEntry is one entry and every delivery of it.
+type activityEntry struct {
+	ItemID int64
+	Title  string
+	URL    string
+	// UpdatedAt is the most recent attempt in the group, which is what "2h ago"
+	// on the line should mean when a retry has moved one of them.
+	UpdatedAt  time.Time
+	Deliveries []*store.DeliveryView
+}
+
+// Status reports the state of the entry as a whole, for the pip on the line:
+// failed if anything failed, otherwise pending if anything is still queued.
+func (e activityEntry) Status() string {
+	status := "sent"
+	for _, d := range e.Deliveries {
+		switch d.Status {
+		case "failed":
+			return "failed"
+		case "pending":
+			status = "pending"
+		}
+	}
+	return status
+}
+
+// groupActivity folds delivery rows, newest first, into one entry each.
+//
+// full says the read hit its limit, which means the oldest group in it may have
+// been cut in half — some of its deliveries are in the rows that were not read.
+// Rendering that group would show an entry as posted to two destinations when
+// it went to five, so it is dropped rather than shown wrong.
+func groupActivity(rows []*store.DeliveryView, full bool) ([]activityEntry, bool) {
+	entries := make([]activityEntry, 0, activityEntries)
+	at := make(map[int64]int, activityEntries)
+	for _, d := range rows {
+		i, ok := at[d.ItemID]
+		if !ok {
+			at[d.ItemID] = len(entries)
+			entries = append(entries, activityEntry{
+				ItemID: d.ItemID, Title: d.ItemTitle, URL: d.ItemURL, UpdatedAt: d.UpdatedAt,
+			})
+			i = len(entries) - 1
+		}
+		e := &entries[i]
+		e.Deliveries = append(e.Deliveries, d)
+		if d.UpdatedAt.After(e.UpdatedAt) {
+			e.UpdatedAt = d.UpdatedAt
+		}
+	}
+	if full && len(entries) > 0 {
+		entries = entries[:len(entries)-1]
+	}
+	if len(entries) > activityEntries {
+		return entries[:activityEntries], true
+	}
+	return entries, full
+}
+
+// recentActivity reads the history and groups it.
+func (s *Server) recentActivity(ctx context.Context, userID int64) ([]activityEntry, bool, error) {
+	rows, err := s.store.RecentDeliveries(ctx, userID, activityRows)
+	if err != nil {
+		return nil, false, err
+	}
+	entries, more := groupActivity(rows, len(rows) == activityRows)
+	return entries, more, nil
 }
 
 // kindRow is one line of the destinations list: a service, and the account's
@@ -94,7 +184,7 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	if data.Destinations, err = s.routedDestinations(r.Context(), user.ID, data.Feed); err != nil {
 		s.log.Error("load destinations", "error", err)
 	}
-	if data.Deliveries, err = s.store.RecentDeliveries(r.Context(), user.ID, 25); err != nil {
+	if data.Activity, data.ActivityMore, err = s.recentActivity(r.Context(), user.ID); err != nil {
 		s.log.Error("load deliveries", "error", err)
 	}
 	if data.Pending, err = s.store.PendingCount(r.Context(), user.ID); err != nil {
@@ -209,7 +299,7 @@ func (s *Server) dashboardError(w http.ResponseWriter, r *http.Request, msg, fee
 		data.Feed = f
 	}
 	data.Destinations, _ = s.routedDestinations(r.Context(), user.ID, data.Feed)
-	data.Deliveries, _ = s.store.RecentDeliveries(r.Context(), user.ID, 25)
+	data.Activity, data.ActivityMore, _ = s.recentActivity(r.Context(), user.ID)
 	s.render(w, r, http.StatusBadRequest, "dashboard", page{Title: "feedrepeater", Error: msg, Data: data})
 }
 
