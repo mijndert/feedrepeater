@@ -154,15 +154,22 @@ header nav a.on { color: var(--fg); font-weight: 600; }
 
 footer {
   display: flex;
-  gap: var(--s4);
+  flex-direction: column;
+  gap: var(--s2);
   margin-top: 2.25rem;
   padding-top: var(--s4);
   border-top: 1px solid var(--line);
   color: var(--muted);
   font-size: .8rem;
 }
+.footer-links { display: flex; gap: var(--s4); }
 footer a { color: inherit; }
 footer a:hover { color: var(--fg); text-decoration: none; }
+
+/* The one link down here that is asking to be clicked, so it is the one that
+   is underlined. Still muted: a request, not a banner. */
+.support { margin: 0; max-width: 34rem; }
+.support a { color: var(--fg); text-decoration: underline; }
 
 /* ── Sections: separated by a rule, never a box ────────────── */
 
@@ -206,16 +213,6 @@ p:last-child { margin-bottom: 0; }
 
 /* ── Services, on the front page ───────────────────────────── */
 
-/* The supported services, named and nothing more: what each one does is on the
-   dashboard where it is about to be connected. The names are generated from the
-   destination registry, so this cannot fall behind the code the way a sentence
-   naming them did. */
-.services {
-  color: var(--muted);
-  font-size: .88rem;
-  max-width: 30rem;
-}
-
 /* ── Messages ──────────────────────────────────────────────── */
 
 .error, .notice {
@@ -228,14 +225,6 @@ p:last-child { margin-bottom: 0; }
 }
 .error { border-left-color: var(--bad); }
 .notice { border-left-color: var(--accent); }
-
-.callout {
-  padding: .85rem var(--s4);
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  margin-bottom: var(--s5);
-}
-.callout p:last-child { margin-bottom: 0; }
 
 /* ── The feed ──────────────────────────────────────────────── */
 
@@ -412,13 +401,6 @@ input[type="checkbox"]:checked {
 input[type="checkbox"]:checked::before { transform: scale(1); }
 input[type="checkbox"]:hover:not(:checked):not(:disabled) { border-color: var(--muted); }
 
-/* A service with nothing connected still gets the column, so the names line
-   up. Its box is inert: dimmed, and it does not answer the pointer. */
-input[type="checkbox"]:disabled {
-  opacity: .45;
-  cursor: default;
-}
-
 .checkbox {
   display: flex;
   align-items: center;
@@ -428,56 +410,6 @@ input[type="checkbox"]:disabled {
   width: fit-content;
   cursor: pointer;
 }
-
-/* ── Destinations ──────────────────────────────────────────── */
-
-.items { list-style: none; margin: 0; padding: 0; }
-
-/* Four columns: the control, what it is, how it is doing, and what to press.
-   Status sits right so a column of states can be read without touching the
-   names, and the button is always last, so Connect and Settings land in the
-   same place rather than moving as rows change state. */
-.items li {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto auto;
-  gap: .85rem;
-  align-items: center;
-  padding: .8rem 0;
-  border-bottom: 1px solid var(--line);
-}
-/* No rule above the first row: with nothing between it and the section
-   heading, a top border read as an underline on the heading. */
-
-/* No rule below the last row either. Closing the list there puts a line
-   directly above the Save button, which reads as a divider between the button
-   and the form it belongs to rather than as the end of the list. The row
-   separators alone are enough to group them. */
-.items li:last-child { border-bottom: none; }
-
-.item-name {
-  font-size: .95rem;
-  font-weight: 500;
-  display: block;
-  overflow-wrap: anywhere;
-}
-.item-name a { color: inherit; }
-/* The service name doubles as the checkbox's label where there is one. */
-label.item-name { cursor: pointer; }
-.item-sub {
-  display: block;
-  margin-top: .1rem;
-  font-size: .83rem;
-  color: var(--muted);
-}
-/* Only where it is the checkbox's label does clicking it do anything. */
-label.item-sub { cursor: pointer; }
-.item-state {
-  font-size: .83rem;
-  color: var(--muted);
-  white-space: nowrap;
-}
-.item-state.bad { color: var(--bad); }
-.item-state.ok { color: var(--ok); }
 
 /* ── Activity ──────────────────────────────────────────────── */
 
@@ -490,8 +422,8 @@ label.item-sub { cursor: pointer; }
   padding: .75rem 0;
   border-bottom: 1px solid var(--line);
 }
-/* Open and close the list without a rule, the same as .items above. A top
-   border here read as an underline on the Activity heading, and the bottom one
+/* Open and close the list without a rule. A top border here read as an
+   underline on the Activity heading, and the bottom one
    on the last row drew a line across the end of the section with nothing below
    it to be separated from. The row separators alone are enough to group them. */
 .events li:last-child { border-bottom: none; }
@@ -581,8 +513,6 @@ code {
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: .875em;
 }
-.secret code { overflow-wrap: anywhere; }
-
 .preview {
   margin: 0 0 var(--s2);
   padding: .75rem .85rem;
@@ -601,14 +531,5 @@ code {
   body { padding: var(--s4) var(--s4) 2.5rem; }
   .facts { grid-template-columns: 1fr; gap: 0; }
   .facts dt { margin-top: var(--s2); }
-  /* Status drops under the name rather than squeezing the column. */
-  .items li {
-    grid-template-columns: auto minmax(0, 1fr);
-    row-gap: .3rem;
-  }
-  /* Status and the button drop under the name rather than squeezing three
-     things onto one line. */
-  .item-state:empty { display: none; }
-  .item-state, .items .button { grid-column: 2; justify-self: start; }
   .events li { grid-template-columns: 1fr; gap: .2rem; }
 }

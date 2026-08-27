@@ -2,18 +2,8 @@
 {{$f := .Data}}
 {{$d := $f.Dest}}
 <p class="back"><a href="/dashboard">Back</a></p>
-<h1>{{$d.Label}}</h1>
-<p class="meta">{{kindLabel $d.Kind}} · {{acct $f.Account}}</p>
-
-{{if $f.NewSecret}}
-<div class="callout">
-  <p><strong>Signing secret</strong></p>
-  <p class="secret"><code>{{$f.NewSecret}}</code></p>
-  <p class="hint">Shown once. Verify the <code>X-Feedrepeater-Signature</code> header as
-     <code>sha256=HMAC-SHA256(secret, timestamp + "." + body)</code>, where the timestamp is the
-     <code>X-Feedrepeater-Timestamp</code> header.</p>
-</div>
-{{end}}
+<h1>Post settings</h1>
+<p class="meta">Mastodon · {{acct $f.Account}}</p>
 
 {{if $d.LastError}}<p class="error">Last attempt failed: {{$d.LastError}}</p>{{end}}
 
@@ -23,89 +13,14 @@
   <label for="label">Name</label>
   <input type="text" id="label" name="label" value="{{$f.Label}}" maxlength="80">
 
-  {{if eq $d.Kind "mastodon"}}
-    <label for="visibility">Visibility</label>
-    <select id="visibility" name="visibility">
-      {{range $f.Visibilities}}<option value="{{.}}"{{if eq . $f.Visibility}} selected{{end}}>{{.}}</option>{{end}}
-    </select>
-  {{end}}
-
-  {{if eq $d.Kind "bluesky"}}
-    <label for="app_password">Replace app password</label>
-    <input type="password" id="app_password" name="app_password" autocomplete="new-password" placeholder="Leave empty to keep the current one">
-  {{end}}
-
-  {{if eq $d.Kind "discord"}}
-    <label for="url">Replace webhook URL</label>
-    <input type="url" id="url" name="url" placeholder="Leave empty to keep the current one"
-           autocomplete="off" spellcheck="false">
-    <p class="hint">The stored URL is a credential and is not shown again. A new one is checked with Discord before it replaces it.</p>
-  {{end}}
-
-  {{if eq $d.Kind "slack"}}
-    <label for="url">Replace webhook URL</label>
-    <input type="url" id="url" name="url" placeholder="Leave empty to keep the current one"
-           autocomplete="off" spellcheck="false">
-    <p class="hint">The stored URL is a credential and is not shown again. A new one is checked by posting one line to its channel.</p>
-  {{end}}
-
-  {{if eq $d.Kind "ntfy"}}
-    <label for="topic">Topic</label>
-    <input type="text" id="topic" name="topic" value="{{$f.Topic}}" maxlength="64"
-           autocapitalize="off" autocorrect="off" spellcheck="false" required>
-
-    <label for="server">Server</label>
-    <input type="url" id="server" name="server" value="{{$f.Server}}" autocomplete="off" spellcheck="false">
-
-    <label for="priority">Priority</label>
-    <select id="priority" name="priority">
-      {{range $f.Priorities}}<option value="{{.Value}}"{{if eq .Value $f.Priority}} selected{{end}}>{{.Label}}</option>{{end}}
-    </select>
-
-    <label for="token">Replace access token</label>
-    <input type="password" id="token" name="token" autocomplete="new-password"
-           placeholder="Leave empty to keep the current one">
-    <label class="checkbox"><input type="checkbox" name="clear_token" value="1"> Remove the stored token</label>
-    <p class="hint">
-      Changing the topic, the server or the token publishes one notification to prove the new
-      one works. Changing anything else here does not.
-    </p>
-  {{end}}
-
-  {{if eq $d.Kind "linkding"}}
-    <label for="server">Address</label>
-    <input type="url" id="server" name="server" value="{{$f.Server}}" autocomplete="off" spellcheck="false" required>
-
-    <label for="tags">Tags</label>
-    <input type="text" id="tags" name="tags" value="{{$f.Tags}}"
-           autocapitalize="off" autocorrect="off" spellcheck="false">
-
-    <label class="checkbox"><input type="checkbox" name="unread" value="1"{{if $f.Unread}} checked{{end}}> Save as unread</label>
-
-    <label for="token">Replace API token</label>
-    <input type="password" id="token" name="token" autocomplete="new-password"
-           placeholder="Leave empty to keep the current one">
-    <p class="hint">
-      Changing the address or the token asks linkding to confirm the new one. Nothing is
-      bookmarked to check it, so changing anything else here is free.
-    </p>
-  {{end}}
-
-  {{if eq $d.Kind "webhook"}}
-    <label for="url">URL</label>
-    <input type="url" id="url" name="url" value="{{$f.URL}}" required>
-    <label class="checkbox"><input type="checkbox" name="rotate" value="1"> Generate a new signing secret</label>
-  {{end}}
+  <label for="visibility">Visibility</label>
+  <select id="visibility" name="visibility">
+    {{range $f.Visibilities}}<option value="{{.}}"{{if eq . $f.Visibility}} selected{{end}}>{{.}}</option>{{end}}
+  </select>
 
   <label for="template">Post text</label>
   <textarea id="template" name="template" rows="4">{{$f.Template}}</textarea>
   <p class="hint">Placeholders: {{range $i, $v := $f.Variables}}{{if $i}}, {{end}}<code>{{"{{"}}{{$v.Name}}{{"}}"}}</code>{{end}}</p>
-  {{if eq $d.Kind "linkding"}}
-    <p class="hint">
-      For a bookmark this is the description. The link and the title are sent as their own
-      fields, so <code>{{"{{"}}summary{{"}}"}}</code> on its own is often all you want here.
-    </p>
-  {{end}}
 
   {{if $f.Preview}}
   <p class="hint">Preview</p>
@@ -113,6 +28,7 @@
   {{end}}
 
   <label class="checkbox"><input type="checkbox" name="paused" value="1"{{if $f.Paused}} checked{{end}}> Paused</label>
+  <p class="hint">Paused keeps reading the feed and stops posting it. Pausing the feed itself, on the dashboard, stops both.</p>
 
   <button type="submit" class="primary">Save</button>
 </form>
@@ -121,10 +37,6 @@
   <form method="post" action="/destinations/{{$d.ID}}/test">
     <input type="hidden" name="csrf" value="{{.CSRF}}">
     <button type="submit">Send test post</button>
-  </form>
-  <form method="post" action="/destinations/{{$d.ID}}/delete" class="right">
-    <input type="hidden" name="csrf" value="{{.CSRF}}">
-    <button type="submit" class="quiet danger">Remove</button>
   </form>
 </div>
 {{end}}

@@ -36,7 +36,7 @@ func queued(t *testing.T) (*Publisher, *store.Store, *store.DueDelivery) {
 	}
 	hc := safehttp.New(safehttp.Options{UserAgent: "test"})
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	p := New(st, keys, hc, mastodon.New(hc), log)
+	p := New(st, keys, mastodon.New(hc), log)
 
 	user, err := st.UpsertUser(ctx, &store.User{
 		Host: "example.social", RemoteID: "alice-id", Acct: "alice", AccessToken: []byte("x"),
@@ -49,7 +49,7 @@ func queued(t *testing.T) (*Publisher, *store.Store, *store.DueDelivery) {
 		t.Fatal(err)
 	}
 	if err := st.CreateDestination(ctx, &store.Destination{
-		UserID: user.ID, Kind: "discord", Label: "Team channel",
+		UserID: user.ID, Kind: "mastodon", Label: "@alice@example.social",
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -88,7 +88,7 @@ func nextAttempt(t *testing.T, st *store.Store, userID int64) time.Time {
 func TestRetryHonoursTheDelayAServiceAsksFor(t *testing.T) {
 	p, st, dl := queued(t)
 
-	failure := destination.WithRetryAfter(errors.New("discord returned 429"), 40*time.Minute)
+	failure := destination.WithRetryAfter(errors.New("the instance returned 429"), 40*time.Minute)
 	p.retry(context.Background(), dl, "rate limited", failure)
 
 	got := time.Until(nextAttempt(t, st, dl.UserID))
@@ -103,7 +103,7 @@ func TestRetryKeepsItsOwnBackoffWhenItIsLonger(t *testing.T) {
 	p, st, dl := queued(t)
 
 	dl.Attempts = 4 // backoff is already well past a minute here
-	failure := destination.WithRetryAfter(errors.New("discord returned 429"), time.Second)
+	failure := destination.WithRetryAfter(errors.New("the instance returned 429"), time.Second)
 	p.retry(context.Background(), dl, "rate limited", failure)
 
 	if got := time.Until(nextAttempt(t, st, dl.UserID)); got < time.Minute {

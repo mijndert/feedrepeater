@@ -7,26 +7,19 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/http"
-	"net/url"
-	"strconv"
-	"strings"
 	"time"
 
 	"feedrepeater.com/internal/render"
 	"feedrepeater.com/internal/safehttp"
 )
 
-// Kinds, as stored in destinations.kind.
-const (
-	KindMastodon = "mastodon"
-	KindBluesky  = "bluesky"
-	KindDiscord  = "discord"
-	KindSlack    = "slack"
-	KindNtfy     = "ntfy"
-	KindLinkding = "linkding"
-	KindWebhook  = "webhook"
-)
+// KindMastodon is the only kind, as stored in destinations.kind.
+//
+// The column and this constant stay even with one value in them: they are the
+// seam a second service goes back through, and a schema that has never carried
+// a kind is a migration rather than a switch case. Bluesky, Discord, Slack,
+// ntfy, linkding and generic webhooks were all here and are in the history.
+const KindMastodon = "mastodon"
 
 // Post is one rendered entry ready to be published.
 type Post struct {
@@ -36,7 +29,7 @@ type Post struct {
 	IdempotencyKey string
 }
 
-// Item is the source entry, passed through to webhooks unrendered.
+// Item is the source entry, before a template has been applied to it.
 type Item struct {
 	Title     string
 	URL       string
@@ -44,7 +37,6 @@ type Item struct {
 	Author    string
 	Published time.Time
 	FeedTitle string
-	FeedURL   string
 }
 
 // Result is what a successful send reports back.
@@ -74,48 +66,14 @@ type Kind struct {
 	DefaultTemplate string
 }
 
-// Kinds lists the supported destinations in display order.
+// Kinds lists the supported destinations in display order. There is one, and
+// every account gets it automatically, so this is what the FAQ and the front
+// page read rather than a menu anyone picks from.
 var Kinds = []Kind{
 	{
 		Name:            KindMastodon,
 		Label:           "Mastodon",
 		Description:     "Post as a status on any Mastodon-compatible server.",
-		DefaultTemplate: render.DefaultTemplate,
-	},
-	{
-		Name:            KindBluesky,
-		Label:           "Bluesky",
-		Description:     "Post to a Bluesky account using an app password.",
-		DefaultTemplate: render.DefaultTemplate,
-	},
-	{
-		Name:            KindDiscord,
-		Label:           "Discord",
-		Description:     "Post to a channel with a Discord webhook URL.",
-		DefaultTemplate: render.DefaultTemplate,
-	},
-	{
-		Name:            KindSlack,
-		Label:           "Slack",
-		Description:     "Post to a channel with a Slack incoming webhook.",
-		DefaultTemplate: render.DefaultTemplate,
-	},
-	{
-		Name:            KindNtfy,
-		Label:           "ntfy",
-		Description:     "Push a notification to a phone through an ntfy topic.",
-		DefaultTemplate: render.DefaultTemplate,
-	},
-	{
-		Name:            KindLinkding,
-		Label:           "linkding",
-		Description:     "Save each entry as a bookmark in your own linkding.",
-		DefaultTemplate: render.DefaultTemplate,
-	},
-	{
-		Name:            KindWebhook,
-		Label:           "Webhook",
-		Description:     "Send a signed JSON request to a URL you control.",
 		DefaultTemplate: render.DefaultTemplate,
 	},
 }
@@ -173,32 +131,6 @@ func RetryAfter(err error) (time.Duration, bool) {
 	return 0, false
 }
 
-// headerRetryAfter reads a Retry-After header in both of its forms, a delay in
-// seconds or an HTTP date, and bounds it by maxRetryAfter. Services with a
-// richer answer than the header — Discord puts a fractional value in the body —
-// parse their own.
-func headerRetryAfter(v string) time.Duration {
-	v = strings.TrimSpace(v)
-	if v == "" {
-		return 0
-	}
-	var out time.Duration
-	if secs, err := strconv.Atoi(v); err == nil {
-		if secs <= 0 {
-			return 0
-		}
-		out = time.Duration(secs) * time.Second
-	} else if t, err := http.ParseTime(v); err == nil {
-		if out = time.Until(t); out <= 0 {
-			return 0
-		}
-	}
-	if out > maxRetryAfter {
-		return maxRetryAfter
-	}
-	return out
-}
-
 // IsPermanent reports whether an error should end retries.
 func IsPermanent(err error) bool {
 	var p permanentError
@@ -220,16 +152,6 @@ func retryableStatus(code int) bool {
 	return false
 }
 
-// statusError converts an HTTP response code into an error with the right
-// retry semantics.
-func statusError(service string, code int, detail string) error {
-	err := fmt.Errorf("%s returned %d%s", service, code, detail)
-	if retryableStatus(code) {
-		return err
-	}
-	return Permanent(err)
-}
-
 // jsonConfig decodes a destination's non-secret config blob.
 func jsonConfig(raw string, out any) error {
 	if raw == "" {
@@ -239,17 +161,4 @@ func jsonConfig(raw string, out any) error {
 		return fmt.Errorf("destination: unreadable config: %w", err)
 	}
 	return nil
-}
-
-// publicURL validates a stored URL before use. Configuration is validated on
-// save, but it is re-checked here because DNS can change under a stored name.
-func publicURL(hc *safehttp.Client, raw string) (*url.URL, error) {
-	u, err := url.Parse(raw)
-	if err != nil {
-		return nil, Permanent(err)
-	}
-	if err := hc.ValidateURL(u); err != nil {
-		return nil, Permanent(err)
-	}
-	return u, nil
 }

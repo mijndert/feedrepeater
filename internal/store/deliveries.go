@@ -134,7 +134,6 @@ type DueDelivery struct {
 	Item        Item
 	Destination Destination
 	FeedTitle   string
-	FeedURL     string
 	// Timezone is the account's own, which is what {{published}} renders in.
 	Timezone string
 }
@@ -145,7 +144,7 @@ func (s *Store) DueDeliveries(ctx context.Context, limit int) ([]*DueDelivery, e
 		SELECT dl.id, dl.user_id, dl.item_id, dl.destination_id, dl.attempts,
 			i.feed_id, i.guid, i.url, i.title, i.summary, i.author, i.published_at,
 			d.user_id, d.kind, d.label, d.config, d.credentials, d.template, d.paused,
-			f.title, f.url, u.timezone
+			f.title, u.timezone
 		FROM deliveries dl
 		JOIN items i ON i.id = dl.item_id
 		JOIN destinations d ON d.id = dl.destination_id
@@ -168,7 +167,7 @@ func (s *Store) DueDeliveries(ctx context.Context, limit int) ([]*DueDelivery, e
 			&d.Item.Author, &published,
 			&d.Destination.UserID, &d.Destination.Kind, &d.Destination.Label,
 			&d.Destination.Config, &d.Destination.Credentials, &d.Destination.Template, &paused,
-			&d.FeedTitle, &d.FeedURL, &d.Timezone); err != nil {
+			&d.FeedTitle, &d.Timezone); err != nil {
 			return nil, err
 		}
 		d.Item.ID, d.Destination.ID = d.ItemID, d.DestinationID

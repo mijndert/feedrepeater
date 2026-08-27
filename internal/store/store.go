@@ -30,6 +30,7 @@ var migrations = []string{
 	mustRead("migrations/005_one_destination_per_kind.sql"),
 	mustRead("migrations/006_user_preferences.sql"),
 	mustRead("migrations/007_shared_feeds.sql"),
+	mustRead("migrations/008_mastodon_only.sql"),
 }
 
 func mustRead(name string) string {

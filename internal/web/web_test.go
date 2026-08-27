@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html/template"
 	"io"
@@ -70,7 +71,7 @@ func newHarness(t *testing.T, opts ...func(*config.Config)) *harness {
 
 	srv, err := NewServer(Deps{
 		Config: cfg, Store: st, Keyring: keys, HTTP: hc, Mastodon: md,
-		Fetcher: feed.NewFetcher(hc), Publisher: publisher.New(st, keys, hc, md, log), Logger: log,
+		Fetcher: feed.NewFetcher(hc), Publisher: publisher.New(st, keys, md, log), Logger: log,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -82,8 +83,15 @@ func newHarness(t *testing.T, opts ...func(*config.Config)) *harness {
 func (h *harness) signIn(t *testing.T, acct string) (*store.User, *http.Cookie, string) {
 	t.Helper()
 	ctx := context.Background()
+	// Sealed rather than a placeholder: the account's own token is what the
+	// Mastodon destination is made from, so a harness that stores something
+	// unreadable is a harness where nobody can add a feed.
+	sealed, err := h.keys.EncryptString(secret.PurposeUserToken, "token-"+acct)
+	if err != nil {
+		t.Fatal(err)
+	}
 	user, err := h.store.UpsertUser(ctx, &store.User{
-		Host: "example.social", RemoteID: acct + "-id", Acct: acct, AccessToken: []byte("x"),
+		Host: "example.social", RemoteID: acct + "-id", Acct: acct, AccessToken: sealed,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -153,8 +161,8 @@ func TestStatsPublishesCountsAndNothingIdentifying(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := h.store.CreateDestination(ctx, &store.Destination{
-		UserID: user.ID, Kind: "discord", Label: "my-private-channel",
-		Credentials: []byte("super-secret-webhook"),
+		UserID: user.ID, Kind: "mastodon", Label: "@alice@private.example",
+		Credentials: []byte("super-secret-token"),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -179,12 +187,13 @@ func TestStatsPublishesCountsAndNothingIdentifying(t *testing.T) {
 	if got.Feeds.Total != 1 || got.Feeds.Active != 1 || got.Feeds.Stopped != 0 {
 		t.Errorf("feeds = %+v, want total 1 active 1 paused 0", got.Feeds)
 	}
-	if got.Destinations.Total != 1 || got.Destinations.ByKind["discord"] != 1 {
-		t.Errorf("destinations = %+v, want total 1 with one discord", got.Destinations)
+	if got.Destinations.Total != 1 || got.Destinations.ByKind["mastodon"] != 1 {
+		t.Errorf("destinations = %+v, want total 1 with one mastodon", got.Destinations)
 	}
-	// Kinds nobody configured still appear, so consumers see a stable shape.
-	if _, ok := got.Destinations.ByKind["mastodon"]; !ok {
-		t.Error("by_kind should carry every supported kind, including zeroes")
+	// The map is built from the registry rather than from what happens to be in
+	// the table, so consumers see a stable shape as kinds come and go.
+	if len(got.Destinations.ByKind) != 1 {
+		t.Errorf("by_kind = %v, want one entry per supported kind", got.Destinations.ByKind)
 	}
 	if !got.Service.AcceptingSignups {
 		t.Error("accepting_signups should be true with no cap configured")
@@ -355,42 +364,6 @@ func TestCrossSiteRequestsAreRefused(t *testing.T) {
 	}
 }
 
-// The highest-value bug in a multi-tenant app: reaching another account's
-// destination by id.
-func TestDestinationRoutesAreOwnerScoped(t *testing.T) {
-	h := newHarness(t)
-	alice, _, _ := h.signIn(t, "alice")
-	_, mallorysCookie, mallorysCSRF := h.signIn(t, "mallory")
-
-	d := &store.Destination{UserID: alice.ID, Kind: "webhook", Label: "Alice's hook", Template: "{{title}}"}
-	if err := h.store.CreateDestination(context.Background(), d); err != nil {
-		t.Fatal(err)
-	}
-	id := strconv.FormatInt(d.ID, 10)
-
-	req := httptest.NewRequest(http.MethodGet, "/destinations/"+id, nil)
-	req.AddCookie(mallorysCookie)
-	if rec := h.do(req); rec.Code != http.StatusNotFound {
-		t.Errorf("GET another user's destination = %d, want 404", rec.Code)
-	}
-
-	for _, path := range []string{"/destinations/" + id, "/destinations/" + id + "/delete", "/destinations/" + id + "/test"} {
-		req := postForm(path, url.Values{"csrf": {mallorysCSRF}, "label": {"stolen"}})
-		req.AddCookie(mallorysCookie)
-		if rec := h.do(req); rec.Code != http.StatusNotFound {
-			t.Errorf("POST %s as another user = %d, want 404", path, rec.Code)
-		}
-	}
-
-	got, err := h.store.Destination(context.Background(), alice.ID, d.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got.Label != "Alice's hook" {
-		t.Errorf("destination was modified by another user: %q", got.Label)
-	}
-}
-
 func TestSessionCookieFlags(t *testing.T) {
 	h := newHarness(t)
 	rec := httptest.NewRecorder()
@@ -520,12 +493,8 @@ func TestAddingAFeedDoesNotPostItsBacklog(t *testing.T) {
 	user, cookie, csrf := h.signIn(t, "alice")
 	ctx := context.Background()
 
-	if err := h.store.CreateDestination(ctx, &store.Destination{
-		UserID: user.ID, Kind: "webhook", Label: "hook", Template: "{{title}}",
-	}); err != nil {
-		t.Fatal(err)
-	}
-
+	// No destination is created here: adding the feed makes one, which is what
+	// makes "the backlog is not posted" worth asserting at all.
 	body := `<?xml version="1.0"?><rss version="2.0"><channel><title>Backlog</title>` +
 		`<item><title>Old one</title><link>https://example.com/1</link><guid>g1</guid></item>` +
 		`<item><title>Old two</title><link>https://example.com/2</link><guid>g2</guid></item>` +
@@ -569,85 +538,6 @@ func TestAddingAFeedDoesNotPostItsBacklog(t *testing.T) {
 	}
 	if res.Queued != 0 {
 		t.Errorf("a later poll queued %d of the backlog entries", res.Queued)
-	}
-}
-
-func TestFeedRoutingThroughTheHandler(t *testing.T) {
-	h := newHarness(t)
-	user, cookie, csrf := h.signIn(t, "alice")
-	ctx := context.Background()
-
-	f, _, err := h.store.Subscribe(ctx, user.ID, "https://example.com/feed.xml", "", nil, store.FetchState{NextFetchAt: time.Now().UTC()})
-	if err != nil {
-		t.Fatal(err)
-	}
-	keep := &store.Destination{UserID: user.ID, Kind: "webhook", Label: "keep"}
-	drop := &store.Destination{UserID: user.ID, Kind: "mastodon", Label: "drop"}
-	for _, d := range []*store.Destination{keep, drop} {
-		if err := h.store.CreateDestination(ctx, d); err != nil {
-			t.Fatal(err)
-		}
-	}
-
-	req := postForm("/feed/destinations", url.Values{
-		"csrf":        {csrf},
-		"destination": {strconv.FormatInt(keep.ID, 10)},
-	})
-	req.AddCookie(cookie)
-	if rec := h.do(req); rec.Code != http.StatusSeeOther {
-		t.Fatalf("saving routes = %d, want 303", rec.Code)
-	}
-
-	routes, err := h.store.FeedRoutes(ctx, user.ID, f.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(routes) != 1 || routes[0] != keep.ID {
-		t.Errorf("routes = %v, want [%d]", routes, keep.ID)
-	}
-
-	// The dashboard reflects the choice.
-	dash := httptest.NewRequest(http.MethodGet, "/dashboard", nil)
-	dash.AddCookie(cookie)
-	body := h.do(dash).Body.String()
-	if !strings.Contains(body, `value="`+strconv.FormatInt(keep.ID, 10)+`" checked`) {
-		t.Error("routed destination is not ticked on the dashboard")
-	}
-	if strings.Contains(body, `value="`+strconv.FormatInt(drop.ID, 10)+`" checked`) {
-		t.Error("unrouted destination is ticked on the dashboard")
-	}
-}
-
-// Routing is where an id from another account would do damage if it were
-// trusted, so the handler is checked as well as the store.
-func TestFeedRoutingRejectsAnotherAccountsDestination(t *testing.T) {
-	h := newHarness(t)
-	alice, _, _ := h.signIn(t, "alice")
-	mallory, mallorysCookie, mallorysCSRF := h.signIn(t, "mallory")
-	ctx := context.Background()
-
-	victim := &store.Destination{UserID: alice.ID, Kind: "webhook", Label: "Alice's hook"}
-	if err := h.store.CreateDestination(ctx, victim); err != nil {
-		t.Fatal(err)
-	}
-	f, _, err := h.store.Subscribe(ctx, mallory.ID, "https://example.com/mallory.xml", "", nil, store.FetchState{NextFetchAt: time.Now().UTC()})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	req := postForm("/feed/destinations", url.Values{
-		"csrf":        {mallorysCSRF},
-		"destination": {strconv.FormatInt(victim.ID, 10)},
-	})
-	req.AddCookie(mallorysCookie)
-	h.do(req)
-
-	routes, err := h.store.FeedRoutes(ctx, mallory.ID, f.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(routes) != 0 {
-		t.Errorf("attached another account's destination: %v", routes)
 	}
 }
 
@@ -886,156 +776,6 @@ func TestFailedDeliveryCanBeRetriedByItsOwnerOnly(t *testing.T) {
 	}
 }
 
-// For Discord and Slack the webhook URL is the whole authorisation. It is
-// sealed like a password, and no page may hand it back: a screenshot of the
-// edit form would otherwise be enough to post into someone's channel.
-func TestChannelWebhookURLsAreNeverRenderedBack(t *testing.T) {
-	h := newHarness(t)
-	user, cookie, csrf := h.signIn(t, "alice")
-	ctx := context.Background()
-
-	const discordURL = "https://discord.com/api/webhooks/123456789/dISCORDtOKENvalue"
-	const slackURL = "https://hooks.slack.com/services/T012AB/B034CD/slackTOKENvalue"
-
-	discord := &store.Destination{UserID: user.ID, Kind: "discord", Label: "Team channel"}
-	if err := h.server.setConfig(discord, destination.DiscordConfig{
-		WebhookID: "123456789", ChannelID: "222", GuildID: "111", Name: "feed bot",
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if err := h.server.setCredentials(discord, destination.DiscordCredentials{URL: discordURL}); err != nil {
-		t.Fatal(err)
-	}
-	if err := h.store.CreateDestination(ctx, discord); err != nil {
-		t.Fatal(err)
-	}
-
-	slack := &store.Destination{UserID: user.ID, Kind: "slack", Label: "Slack channel"}
-	if err := h.server.setConfig(slack, destination.SlackConfig{Team: "T012AB", Hook: "B034CD"}); err != nil {
-		t.Fatal(err)
-	}
-	if err := h.server.setCredentials(slack, destination.SlackCredentials{URL: slackURL}); err != nil {
-		t.Fatal(err)
-	}
-	if err := h.store.CreateDestination(ctx, slack); err != nil {
-		t.Fatal(err)
-	}
-
-	for _, d := range []*store.Destination{discord, slack} {
-		path := "/destinations/" + strconv.FormatInt(d.ID, 10)
-		req := httptest.NewRequest(http.MethodGet, path, nil)
-		req.AddCookie(cookie)
-		body := h.do(req).Body.String()
-		for _, leak := range []string{"dISCORDtOKENvalue", "slackTOKENvalue"} {
-			if strings.Contains(body, leak) {
-				t.Errorf("%s renders the stored webhook URL", path)
-			}
-		}
-
-		// A rejected save must not echo the submitted one either.
-		post := postForm(path, url.Values{"csrf": {csrf}, "url": {"https://example.com/not-a-webhook"}})
-		post.AddCookie(cookie)
-		rec := h.do(post)
-		if rec.Code != http.StatusBadRequest {
-			t.Errorf("POST %s with a foreign host = %d, want 400", path, rec.Code)
-		}
-		if strings.Contains(rec.Body.String(), "example.com/not-a-webhook") {
-			t.Errorf("%s echoed the submitted URL back into the form", path)
-		}
-	}
-
-	// The dashboard lists them without the credential too.
-	req := httptest.NewRequest(http.MethodGet, "/dashboard", nil)
-	req.AddCookie(cookie)
-	if body := h.do(req).Body.String(); strings.Contains(body, "slackTOKENvalue") || strings.Contains(body, "dISCORDtOKENvalue") {
-		t.Error("the dashboard shows a stored webhook URL")
-	}
-}
-
-// One destination per kind is what the dashboard is drawn from: a row per
-// service, connected or not. The handlers have to hold that rule up, or the
-// second destination of a kind would have no row to appear in.
-func TestOneDestinationPerKind(t *testing.T) {
-	h := newHarness(t)
-	user, cookie, csrf := h.signIn(t, "alice")
-
-	d := &store.Destination{UserID: user.ID, Kind: "webhook", Label: "Site hook"}
-	if err := h.store.CreateDestination(context.Background(), d); err != nil {
-		t.Fatal(err)
-	}
-
-	req := httptest.NewRequest(http.MethodGet, "/destinations/new?kind=webhook", nil)
-	req.AddCookie(cookie)
-	rec := h.do(req)
-	if rec.Code != http.StatusSeeOther {
-		t.Errorf("GET the form for a connected kind = %d, want 303", rec.Code)
-	}
-	if got := rec.Header().Get("Location"); got != "/destinations/"+strconv.FormatInt(d.ID, 10) {
-		t.Errorf("redirected to %q, want the destination that already exists", got)
-	}
-
-	// The form is still reachable by hand, so the create path has to refuse a
-	// second one itself rather than leaning on the redirect above.
-	post := postForm("/destinations", url.Values{
-		"csrf": {csrf}, "kind": {"webhook"}, "url": {"https://example.com/hook"},
-	})
-	post.AddCookie(cookie)
-	if rec := h.do(post); rec.Code != http.StatusBadRequest {
-		t.Errorf("creating a second webhook = %d, want 400", rec.Code)
-	}
-	list, err := h.store.DestinationsByUser(context.Background(), user.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(list) != 1 {
-		t.Errorf("account holds %d webhooks, want 1", len(list))
-	}
-}
-
-// The destinations list is the only route to a new destination, so a kind must
-// show a button until the account has one and its connected state afterwards.
-func TestConnectListMarksTheKindsInUse(t *testing.T) {
-	h := newHarness(t)
-	user, cookie, _ := h.signIn(t, "alice")
-
-	get := func() string {
-		req := httptest.NewRequest(http.MethodGet, "/dashboard", nil)
-		req.AddCookie(cookie)
-		return h.do(req).Body.String()
-	}
-
-	body := get()
-	for _, kind := range []string{"mastodon", "bluesky", "discord", "slack", "ntfy", "linkding", "webhook"} {
-		if !strings.Contains(body, `href="/destinations/new?kind=`+kind+`"`) {
-			t.Errorf("no connect button for %s", kind)
-		}
-	}
-	if strings.Contains(body, "Connected") {
-		t.Error("a kind reads as connected with no destinations")
-	}
-
-	d := &store.Destination{UserID: user.ID, Kind: "mastodon", Label: "@alice@example.social"}
-	if err := h.store.CreateDestination(context.Background(), d); err != nil {
-		t.Fatal(err)
-	}
-
-	body = get()
-	if !strings.Contains(body, `class="item-state ok">Connected`) {
-		t.Error("the connected kind is not marked")
-	}
-	// The way to a destination's settings has to be a control, not a link
-	// hidden in the status line, or nobody finds the post template.
-	if !strings.Contains(body, `<a class="button" href="/destinations/`+strconv.FormatInt(d.ID, 10)+`">Settings</a>`) {
-		t.Error("a connected row has no Settings button")
-	}
-	if strings.Contains(body, `href="/destinations/new?kind=mastodon"`) {
-		t.Error("a connected kind still offers a connect button")
-	}
-	if !strings.Contains(body, `href="/destinations/new?kind=bluesky"`) {
-		t.Error("connecting one kind removed the button for another")
-	}
-}
-
 // The dashboard's appearance depends on classes the template emits. These are
 // cheap to break silently during a restyle, so they are asserted here.
 func TestDashboardEmitsStyleHooks(t *testing.T) {
@@ -1067,9 +807,6 @@ func TestDashboardEmitsStyleHooks(t *testing.T) {
 		`class="feed-name"`, // feed title carries the display size
 		`class="feed-url"`,  // address is set in mono
 		`class="state"`,     // status renders as a dot and a word
-		`class="items"`,     // destinations list
-		`type="checkbox"`,   // still a real checkbox, not a stand-in
-		`class="primary"`,   // exactly one filled button per form
 		`class="events"`,    // activity is a list, not a table
 		`pip-pending`,       // delivery state drives the pip colour
 	} {
@@ -1080,42 +817,13 @@ func TestDashboardEmitsStyleHooks(t *testing.T) {
 	if strings.Contains(body, "<table") {
 		t.Error("activity still renders as a table")
 	}
-}
-
-// A link inside a <label> makes the whole row ambiguous: clicking the
-// destination name would both follow the link and toggle the checkbox. The
-// label must point at the checkbox by id and wrap only inert text.
-func TestDestinationRowSeparatesLinkFromLabel(t *testing.T) {
-	h := newHarness(t)
-	user, cookie, _ := h.signIn(t, "alice")
-	ctx := context.Background()
-
-	if _, _, err := h.store.Subscribe(ctx, user.ID, "https://example.com/feed.xml", "", nil, store.FetchState{NextFetchAt: time.Now().UTC()}); err != nil {
-		t.Fatal(err)
+	// The destination is not chosen, so nothing on this page asks about it. A
+	// checkbox here would be one that ticks the only option there is.
+	if strings.Contains(body, `type="checkbox"`) {
+		t.Error("the dashboard still asks which destinations to publish to")
 	}
-	d := &store.Destination{UserID: user.ID, Kind: "webhook", Label: "Site hook"}
-	if err := h.store.CreateDestination(ctx, d); err != nil {
-		t.Fatal(err)
-	}
-
-	req := httptest.NewRequest(http.MethodGet, "/dashboard", nil)
-	req.AddCookie(cookie)
-	body := h.do(req).Body.String()
-
-	id := strconv.FormatInt(d.ID, 10)
-	if !strings.Contains(body, `id="dest-`+id+`"`) {
-		t.Error("checkbox has no id for its label to reference")
-	}
-	if !strings.Contains(body, `for="dest-`+id+`"`) {
-		t.Error("label does not reference the checkbox")
-	}
-	// The anchor must not sit inside a label element.
-	for _, chunk := range strings.Split(body, "<label") {
-		if i := strings.Index(chunk, "</label>"); i >= 0 {
-			if strings.Contains(chunk[:i], "<a ") {
-				t.Error("a link is nested inside a label; clicking it would toggle the checkbox")
-			}
-		}
+	if strings.Contains(body, `action="/feed/destinations"`) {
+		t.Error("the routing form is still rendered")
 	}
 }
 
@@ -1320,233 +1028,125 @@ func TestSettingsRejectsUnusableValues(t *testing.T) {
 	}
 }
 
-// The account default exists to be typed once, so the form for a new
-// destination has to start from it rather than from the built-in text.
-func TestNewDestinationStartsFromTheAccountDefault(t *testing.T) {
-	h := newHarness(t)
-	user, cookie, _ := h.signIn(t, "alice")
-	ctx := context.Background()
-
-	const tmpl = "New from {{feed_title}}: {{title}}"
-	if err := h.store.SetUserPreferences(ctx, user.ID, "", tmpl); err != nil {
-		t.Fatal(err)
-	}
-
-	req := httptest.NewRequest(http.MethodGet, "/destinations/new?kind=webhook", nil)
-	req.AddCookie(cookie)
-	body := h.do(req).Body.String()
-	if !strings.Contains(body, template.HTMLEscapeString(tmpl)) {
-		t.Error("the form does not start from the account's default template")
-	}
-
-	// Editing the default must not rewrite what an existing destination posts,
-	// so the text is copied at creation rather than referenced.
-	d := &store.Destination{UserID: user.ID, Kind: "webhook", Label: "Hook", Template: "old text {{url}}"}
-	if err := h.store.CreateDestination(ctx, d); err != nil {
-		t.Fatal(err)
-	}
-	if err := h.store.SetUserPreferences(ctx, user.ID, "", "changed {{title}}"); err != nil {
-		t.Fatal(err)
-	}
-	again, err := h.store.Destination(ctx, user.ID, d.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if again.Template != "old text {{url}}" {
-		t.Errorf("an existing destination's template changed to %q", again.Template)
-	}
-}
-
-// An ntfy access token is a credential like a Bluesky app password: stored
-// sealed, never rendered back, and kept when an edit leaves the field empty.
-func TestNtfyTokenIsKeptButNeverShown(t *testing.T) {
-	h := newHarness(t)
-	user, cookie, csrf := h.signIn(t, "alice")
-	ctx := context.Background()
-
-	const token = "tk_nTFYtOKENvalue"
-	d := &store.Destination{UserID: user.ID, Kind: "ntfy", Label: "Phone"}
-	if err := h.server.setConfig(d, destination.NtfyConfig{
-		Server: destination.DefaultNtfyServer, Topic: "my-topic", Priority: 3,
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if err := h.server.setCredentials(d, destination.NtfyCredentials{Token: token}); err != nil {
-		t.Fatal(err)
-	}
-	if err := h.store.CreateDestination(ctx, d); err != nil {
-		t.Fatal(err)
-	}
-	path := "/destinations/" + strconv.FormatInt(d.ID, 10)
-
-	req := httptest.NewRequest(http.MethodGet, path, nil)
-	req.AddCookie(cookie)
-	body := h.do(req).Body.String()
-	if strings.Contains(body, token) {
-		t.Error("the edit form renders the stored access token")
-	}
-	// The topic is not a credential, so unlike a channel webhook it is shown.
-	if !strings.Contains(body, `value="my-topic"`) {
-		t.Error("the topic is not shown back, so it cannot be corrected")
-	}
-
-	// A save that changes only the template must keep the token and must not
-	// publish a notification to prove anything.
-	post := postForm(path, url.Values{
-		"csrf": {csrf}, "label": {"Phone"}, "template": {"{{title}}"},
-		"server": {destination.DefaultNtfyServer}, "topic": {"my-topic"}, "priority": {"3"},
-	})
-	post.AddCookie(cookie)
-	if rec := h.do(post); rec.Code != http.StatusSeeOther {
-		t.Fatalf("saving a template change = %d, want 303: %s", rec.Code, rec.Body)
-	}
-	saved, err := h.store.Destination(ctx, user.ID, d.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := h.server.storedNtfyToken(saved); got != token {
-		t.Errorf("stored token after an unrelated edit = %q, want it unchanged", got)
-	}
-}
-
-// The connect form is the only route to a new destination, so each kind's own
-// fields have to be on it. ntfy's are a topic, a server and a priority.
-func TestNtfyConnectFormOffersItsOwnFields(t *testing.T) {
-	h := newHarness(t)
-	_, cookie, _ := h.signIn(t, "alice")
-
-	req := httptest.NewRequest(http.MethodGet, "/destinations/new?kind=ntfy", nil)
-	req.AddCookie(cookie)
-	rec := h.do(req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("GET the ntfy form = %d, want 200", rec.Code)
-	}
-	body := rec.Body.String()
-	for _, want := range []string{
-		`name="topic"`,
-		`name="server"`,
-		`value="` + destination.DefaultNtfyServer + `"`, // the hosted service is the default
-		`type="password" id="token"`,                    // the token is entered like a password
-		`name="priority"`,
-	} {
-		if !strings.Contains(body, want) {
-			t.Errorf("the ntfy form is missing %s", want)
-		}
-	}
-	// A feed should not decide on its own to buzz a phone at max priority.
-	if !strings.Contains(body, `<option value="3" selected>default</option>`) {
-		t.Error("the form does not start at ntfy's own default priority")
-	}
-}
-
-// linkding's own fields are an address, an API token, tags and the unread flag.
-// The address has no default, unlike ntfy's: a linkding is somebody's own server
-// and there is no hosted one to guess at.
-func TestLinkdingConnectFormOffersItsOwnFields(t *testing.T) {
-	h := newHarness(t)
-	_, cookie, _ := h.signIn(t, "alice")
-
-	req := httptest.NewRequest(http.MethodGet, "/destinations/new?kind=linkding", nil)
-	req.AddCookie(cookie)
-	rec := h.do(req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("GET the linkding form = %d, want 200", rec.Code)
-	}
-	body := rec.Body.String()
-	for _, want := range []string{
-		`name="server"`,
-		`type="password" id="token"`, // the API token is entered like a password
-		`name="tags"`,
-		`name="unread"`,
-	} {
-		if !strings.Contains(body, want) {
-			t.Errorf("the linkding form is missing %s", want)
-		}
-	}
-	// ntfy's default server must not leak across into a field about a different
-	// service, which is what a single shared default would do.
-	if strings.Contains(body, destination.DefaultNtfyServer) {
-		t.Error("the linkding form is pre-filled with ntfy's server")
-	}
-	// A feed arriving as a bookmark is a reading list, so it starts unread.
-	if !strings.Contains(body, `name="unread" value="1" checked`) {
-		t.Error("the form does not start with unread ticked")
-	}
-}
-
-// A linkding API token is a credential like a Bluesky app password: stored
-// sealed, never rendered back, and kept when an edit leaves the field empty.
-func TestLinkdingTokenIsKeptButNeverShown(t *testing.T) {
-	h := newHarness(t)
-	user, cookie, csrf := h.signIn(t, "alice")
-	ctx := context.Background()
-
-	const token = "tk_lINKDINGtOKENvalue"
-	d := &store.Destination{UserID: user.ID, Kind: "linkding", Label: "Bookmarks"}
-	if err := h.server.setConfig(d, destination.LinkdingConfig{
-		Server: "https://linkding.example", Tags: []string{"feeds"}, Unread: true,
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if err := h.server.setCredentials(d, destination.LinkdingCredentials{Token: token}); err != nil {
-		t.Fatal(err)
-	}
-	if err := h.store.CreateDestination(ctx, d); err != nil {
-		t.Fatal(err)
-	}
-	path := "/destinations/" + strconv.FormatInt(d.ID, 10)
-
-	req := httptest.NewRequest(http.MethodGet, path, nil)
-	req.AddCookie(cookie)
-	body := h.do(req).Body.String()
-	if strings.Contains(body, token) {
-		t.Error("the edit form renders the stored API token")
-	}
-	// The address and the tags are not credentials, so they are shown back and
-	// can be corrected.
-	if !strings.Contains(body, `value="https://linkding.example"`) {
-		t.Error("the address is not shown back, so it cannot be corrected")
-	}
-	if !strings.Contains(body, `value="feeds"`) {
-		t.Error("the tags are not shown back, so editing them means retyping them")
-	}
-
-	// A save that changes only the template keeps the token, and asks linkding
-	// nothing: the address it would ask is a server that does not exist here, so a
-	// verification on every save would fail this request.
-	post := postForm(path, url.Values{
-		"csrf": {csrf}, "label": {"Bookmarks"}, "template": {"{{summary}}"},
-		"server": {"https://linkding.example"}, "tags": {"feeds"}, "unread": {"1"},
-	})
-	post.AddCookie(cookie)
-	if rec := h.do(post); rec.Code != http.StatusSeeOther {
-		t.Fatalf("saving a template change = %d, want 303: %s", rec.Code, rec.Body)
-	}
-	saved, err := h.store.Destination(ctx, user.ID, d.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := h.server.storedLinkdingToken(saved); got != token {
-		t.Errorf("stored token after an unrelated edit = %q, want it unchanged", got)
-	}
-}
-
-// The front page is what tells a visitor whether the service does what they came
-// for, and it had already fallen a service behind by being a sentence someone has
-// to remember to edit. Now it is the registry, so every supported kind is named.
-func TestFrontPageNamesEverySupportedService(t *testing.T) {
+// The front page says what it does with the account you sign in with, because
+// that is now the whole of the answer: there is nothing to connect afterwards.
+func TestFrontPageSaysWhereEntriesGo(t *testing.T) {
 	h := newHarness(t)
 	body := h.do(httptest.NewRequest(http.MethodGet, "/", nil)).Body.String()
 
-	for _, kind := range destination.Kinds {
-		if !strings.Contains(body, kind.Label) {
-			t.Errorf("the front page does not name %s", kind.Label)
+	if !strings.Contains(body, "Mastodon") {
+		t.Error("the front page does not name Mastodon")
+	}
+	// Services that were here and are not any more must not still be advertised
+	// on the page somebody decides from.
+	for _, gone := range []string{"Bluesky", "Discord", "Slack", "ntfy", "linkding", "Webhook"} {
+		if strings.Contains(body, gone) {
+			t.Errorf("the front page still offers %s", gone)
 		}
-		// Named only. What each one does belongs on the dashboard, next to the
-		// button that connects it.
-		if strings.Contains(body, kind.Description) {
-			t.Errorf("the front page explains %s as well as naming it", kind.Label)
-		}
+	}
+}
+
+// Adding a feed connects the account to itself. Nobody picks a destination, so
+// the feed has to arrive already publishing somewhere — and to the account that
+// signed in, sealed with that account's own token.
+func TestAddingAFeedConnectsTheSignedInAccount(t *testing.T) {
+	h := newHarness(t, allowPrivate)
+	user, cookie, csrf := h.signIn(t, "alice")
+	ctx := context.Background()
+
+	feedSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/rss+xml")
+		w.Write([]byte(`<?xml version="1.0"?><rss version="2.0"><channel><title>A feed</title></channel></rss>`))
+	}))
+	defer feedSrv.Close()
+
+	req := postForm("/feed", url.Values{"url": {feedSrv.URL}, "csrf": {csrf}})
+	req.AddCookie(cookie)
+	if rec := h.do(req); rec.Code != http.StatusSeeOther {
+		t.Fatalf("saving the feed = %d, want 303: %s", rec.Code, rec.Body.String())
+	}
+
+	list, err := h.store.DestinationsByUser(ctx, user.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list) != 1 {
+		t.Fatalf("account holds %d destinations after adding a feed, want 1", len(list))
+	}
+	d := list[0]
+	if d.Kind != destination.KindMastodon {
+		t.Errorf("destination kind = %q", d.Kind)
+	}
+
+	var cfg destination.MastodonConfig
+	if err := json.Unmarshal([]byte(d.Config), &cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Host != user.Host || cfg.Acct != user.Acct {
+		t.Errorf("destination points at %+v, want the signed-in account", cfg)
+	}
+	if cfg.Visibility != "public" {
+		t.Errorf("visibility = %q, want public", cfg.Visibility)
+	}
+
+	// The token it posts with is the one this account signed in with, sealed
+	// under the destination's own key rather than copied in the clear.
+	raw, err := h.keys.Decrypt(secret.PurposeDestination, d.Credentials)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var creds destination.MastodonCredentials
+	if err := json.Unmarshal(raw, &creds); err != nil {
+		t.Fatal(err)
+	}
+	if creds.AccessToken != "token-alice" {
+		t.Errorf("stored token = %q, want the account's own", creds.AccessToken)
+	}
+
+	// And the feed publishes to it, with nobody having ticked anything.
+	f, err := h.store.FeedByUser(ctx, user.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	routes, err := h.store.FeedRoutes(ctx, user.ID, f.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(routes) != 1 || routes[0] != d.ID {
+		t.Errorf("routes = %v, want [%d]; the feed would be polled and posted nowhere", routes, d.ID)
+	}
+}
+
+// An account whose stored authorisation cannot be read has nothing to post
+// with. The feed is refused rather than saved to be checked forever with
+// nowhere to send what it finds.
+func TestFeedIsRefusedWhenTheAccountCannotBeConnected(t *testing.T) {
+	h := newHarness(t, allowPrivate)
+	user, cookie, csrf := h.signIn(t, "alice")
+	ctx := context.Background()
+
+	user.AccessToken = []byte("not a sealed token")
+	if _, err := h.store.UpsertUser(ctx, user); err != nil {
+		t.Fatal(err)
+	}
+
+	feedSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/rss+xml")
+		w.Write([]byte(`<?xml version="1.0"?><rss version="2.0"><channel><title>A feed</title></channel></rss>`))
+	}))
+	defer feedSrv.Close()
+
+	req := postForm("/feed", url.Values{"url": {feedSrv.URL}, "csrf": {csrf}})
+	req.AddCookie(cookie)
+	rec := h.do(req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("saving the feed = %d, want 400", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "Sign out") {
+		t.Error("the error does not say what to do about it")
+	}
+	if _, err := h.store.FeedByUser(ctx, user.ID); !errors.Is(err, store.ErrNotFound) {
+		t.Error("the feed was saved even though it had nowhere to publish")
 	}
 }
 

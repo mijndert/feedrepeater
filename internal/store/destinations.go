@@ -88,18 +88,6 @@ func (s *Store) UpdateDestination(ctx context.Context, d *Destination) error {
 	return nil
 }
 
-func (s *Store) DeleteDestination(ctx context.Context, userID, id int64) error {
-	res, err := s.rw.ExecContext(ctx, `DELETE FROM destinations WHERE id = ? AND user_id = ?`, id, userID)
-	if err != nil {
-		return err
-	}
-	if n, _ := res.RowsAffected(); n == 0 {
-		return ErrNotFound
-	}
-	return nil
-}
-
-// RecordDestinationResult stores the outcome of the most recent send.
 func (s *Store) RecordDestinationResult(ctx context.Context, id int64, sendErr string) error {
 	if sendErr == "" {
 		_, err := s.rw.ExecContext(ctx,

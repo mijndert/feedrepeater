@@ -1,12 +1,12 @@
 # feedrepeater
 
-Posts RSS and Atom entries to Mastodon, Bluesky, Discord, Slack, ntfy, linkding,
-and webhooks.
+Posts RSS and Atom entries to Mastodon.
 
 Sign in with a Mastodon account on any instance. Add one feed, by its own
 address or by the address of the site, whose page is read for the feed it links
-to. New entries go out automatically; entries already in the feed when you add
-it do not.
+to. New entries are posted to the account you signed in with; entries already in
+the feed when you add it are not. There is nothing to connect: the account is
+the destination.
 
 Single Go binary, SQLite, no JavaScript.
 
@@ -63,117 +63,59 @@ On start the entrypoint restores from the replica if the local database is
 missing, then runs the binary under `litestream replicate`. `task
 litestream:restore` pulls a copy out for inspection.
 
-## Routing
+## Where entries go
 
-A feed publishes to the destinations ticked against it on the dashboard. Adding
-a feed connects it to every destination you already have, and a new destination
-connects to every feed you already have, so the common case needs no decisions;
-untick to narrow it.
+There is one destination and nobody chooses it: the Mastodon account used to
+sign in. It is created on the way in — at sign-in, and again when a feed is
+added if that never worked — so a dashboard with a feed on it is always a
+dashboard that posts somewhere. There is no connect step, no list of services,
+and no ticking which of them a feed publishes to.
 
-The link lives in its own `feed_destinations` table rather than being implied by
-ownership, which is what makes more than one feed per account a schema-free
-change later. The beta limits are two unique constraints and nothing else: one
-on `feeds.user_id`, one on `destinations (user_id, kind)`.
+**Mastodon** posts as that account, using the permission granted at sign-in.
+Visibility is configurable, along with the post text, under Post settings.
 
-## Destinations
+The token the destination posts with is a copy of the account's own, sealed
+under its own key. Every sign-in issues a new token and revokes the one it
+replaces, so the destination is re-sealed against the new one at the same
+moment: signing out and back in is the repair for a destination whose token an
+instance has revoked. The account is matched on its instance host, not on its
+handle, because a handle is display text the instance can change and a rename
+must not quietly stop that repair.
 
-**Mastodon** posts as the account you signed in with, using the permission
-granted at sign-in. Visibility is configurable per destination.
+The link between a feed and its destination still lives in its own
+`feed_destinations` row rather than being implied by ownership, written inside
+the same transaction as the subscription. Nothing edits it. It is what makes
+more than one feed per account, or a second service, a change of code rather
+than a change of shape.
 
-**Bluesky** needs a handle and an [app
-password](https://bsky.app/settings/app-passwords) — not your account password.
-Links become rich-text facets so they are clickable.
+### The other services
 
-**Discord** and **Slack** take a channel webhook URL. That URL is the entire
-authorisation: anyone holding it can post to the channel, with no account and no
-second check. So it is stored encrypted, kept out of the config blob, never
-rendered back, and its host is pinned. Without the pin these would be webhooks
-with none of the challenge the webhook kind demands, which is to say a way to
-aim signed-in traffic at any server. Discord describes a webhook on `GET`, so
-connecting proves the token without posting; Slack has no such call, so
-connecting posts one line to the channel. Discord posts carry
-`allowed_mentions: {parse: []}`, so a feed title containing `@everyone` is text
-rather than a klaxon, and its `Retry-After` on a 429 is obeyed when it is longer
-than the delivery backoff, capped at an hour. Neither service offers an
-idempotency key, so a retry after a timeout that actually arrived can post
-twice; retries only happen when no 2xx was seen.
+Bluesky, Discord, Slack, ntfy, linkding and signed webhooks were all here, and
+were removed in favour of doing one thing. Roughly 3,300 lines went with them,
+along with the whole class of problem they carried: every one of them took an
+address or a credential from a user, and each needed its own proof that the
+address belonged to whoever typed it — an echoed challenge, a pinned host, a
+health probe, a profile read — because without it this service is a way to aim
+signed-in traffic at a stranger's server.
 
-**ntfy** pushes a notification to a topic, titled with the feed and opening the
-entry when tapped. The topic name is not a credential and is shown in the form;
-the optional access token is, so it is stored encrypted and never rendered back.
-The server defaults to `ntfy.sh` and can be your own, which is the interesting
-part: an address supplied by a user is the shape that makes the webhook kind an
-open relay if it is not checked. So connecting asks the address for
-`/v1/health` and requires ntfy's own answer, which means the target has to be a
-cooperating ntfy server rather than merely a URL somebody knows. That is a
-weaker proof than the webhook challenge, which echoes a fresh value, and it is
-the strongest one this protocol offers. Connecting then publishes one
-notification, because ntfy has no way to say whether a topic and token will work
-without using them — and for a notification service the notification arriving is
-the confirmation anyway. Changing the topic, server or token proves the new one
-the same way; changing the template or priority does not, so editing a word does
-not buzz a phone. Messages are published as JSON rather than through ntfy's
-header form, since a header cannot carry a title that is not ASCII.
-
-**linkding** saves each entry as a bookmark in a [linkding](https://linkding.link)
-of your own. It is the one destination that is not a message: the entry's link and
-title are their own fields, the post text becomes the bookmark's description, and
-tags and the unread flag are set per destination. New bookmarks start unread,
-because a reading list of entries nobody has seen yet should say so — linkding's
-own default is read.
-
-The address is user-supplied, like ntfy's, so it has to prove itself. linkding
-answers `/api/user/profile/` with the account's own preferences and only for a
-token it recognises, so requiring that answer proves both halves at once: the
-address is a cooperating linkding, and the token works on it. It is the quietest
-check here — Slack has to post a line and ntfy has to publish a notification,
-because neither can be asked whether a credential works without using it, while
-this reads one document and creates nothing. It is not the strongest: a document
-shape can be served by anyone willing to serve it, so as a barrier against aiming
-this service at a stranger it ranks below a pinned host or an echoed challenge and
-above ntfy's health probe. Changing the address
-or the token proves the new one the same way; changing tags, the unread flag or
-the template does not. An address that is a page inside linkding rather than the
-root it is served from is refused with the address that was meant, since that is
-what a browser's address bar gives you; a prefix from `LD_CONTEXT_PATH` is kept.
-
-The API token grants read and write over the whole bookmark collection, so it is
-stored encrypted, never rendered back, and required — there is no such thing as a
-linkding that takes bookmarks from anybody. Retries cannot duplicate: linkding
-keys a bookmark on its URL and updates the existing one, which is the guarantee
-Discord and Slack cannot give.
-
-**Webhook** sends a JSON `POST` with an HMAC-SHA256 signature:
-
-```
-X-Feedrepeater-Timestamp: 1700000000
-X-Feedrepeater-Signature: sha256=<hex>
-X-Feedrepeater-Delivery: <stable id, repeated on retries>
-```
-
-The signature covers `timestamp + "." + body`. Verify it before trusting the
-payload, and reject timestamps that are not recent:
-
-```go
-mac := hmac.New(sha256.New, []byte(secret))
-mac.Write([]byte(timestamp)); mac.Write([]byte(".")); mac.Write(body)
-ok := hmac.Equal(mac.Sum(nil), sig)
-```
-
-The secret is shown once when the destination is created. `task db:queue` shows
-what has been sent.
+Nothing that takes an address from a user is left. The remaining untrusted URLs
+are feed addresses and instance hostnames, which `internal/safehttp` checks.
+Migration `008_mastodon_only.sql` deletes rows of every other kind, and their
+credentials with them. The code is in the history; the `kind` column and its
+unique index stay behind as the seam a second service comes back through.
 
 ## Post text
 
-Each destination has a template with a fixed set of placeholders:
+The post text is a template with a fixed set of placeholders:
 
 ```
 {{title}} {{url}} {{summary}} {{author}} {{feed_title}} {{published}}
 ```
 
 Substitution is a single literal pass — a value that looks like a placeholder is
-printed, not expanded. Text is trimmed to each service's limit by shortening the
-summary first, then the title. The URL is never truncated.
+printed, not expanded. Text is trimmed to the instance's own post length —
+asked for rather than assumed, since it is not 500 everywhere — by shortening
+the summary first, then the title. The URL is never truncated.
 
 `{{published}}` renders in the account's timezone, set in Settings. It is the
 one placeholder a zone changes, and it changes it where a reader would notice:
@@ -181,10 +123,9 @@ an entry published at 23:00 in Amsterdam is the next day's date in UTC. An
 account that has set no zone gets UTC. The binary embeds the IANA database, so a
 name that the form accepted resolves the same way wherever it runs.
 
-Settings also holds a default post text, which is what a destination added
-afterwards starts from — typed once rather than once per service. It is copied
-onto a destination at creation rather than referenced, so changing it never
-rewrites what an existing destination posts.
+Settings also holds a default post text, which is what an account's destination
+starts from when it is created. It is copied at creation rather than referenced,
+so changing it later never rewrites what is already there.
 
 ## Abuse
 
@@ -194,19 +135,14 @@ count, whether it is flagged as a bot — is worth checking, because the same
 person controls the server saying it. The controls that work are the ones on
 what the service will *do*, not on who is asking.
 
-**Webhooks must prove themselves.** When a webhook is added, the address is
-sent `{"event":"verification","challenge":"…"}` and has to echo the challenge
-back before the destination is stored. Changing the address re-verifies. Without
-this, feedrepeater is an open relay: sign up, point a webhook at someone else's
-server, and we deliver requests there on a schedule. The SSRF guard keeps those
-requests on the public internet, which protects this network and nobody else's.
-
-The rule is about the address, not the kind, so every kind that takes one is
-covered: Discord and Slack pin the host, ntfy requires its server to answer
-ntfy's own health endpoint, linkding has to return a profile document for the
-token given, and the generic webhook echoes a challenge. A new destination that
-accepts an address and does none of these is the same open relay under a
-different name.
+**Nothing here takes an address to deliver to.** A destination is the account
+that signed in, so there is no field in which to name somebody else's server,
+and no way to have this service deliver requests to one on a schedule. That used
+to be the central rule of this section — every kind that accepted an address had
+to prove the address belonged to whoever typed it, by an echoed challenge, a
+pinned host, a health probe or a profile read, or feedrepeater was an open relay
+— and what enforces it now is that the field does not exist. Any future kind
+that accepts an address inherits the old rule with it.
 
 **Signup volume is watched, not capped.** There is deliberately no per-instance
 rate limit: forty accounts from a large server in an afternoon is what a post
@@ -216,12 +152,11 @@ is logged instead, and the answer to a real flood is `FR_BLOCKED_INSTANCES`,
 which shuts out one server, or `FR_MAX_ACCOUNTS`, which closes the door
 entirely. Neither affects existing accounts signing in.
 
-**The blast radius is already small.** One feed per account, one destination per
-service, at most five entries delivered per poll, six delivery attempts before a
-delivery is abandoned, and the poll schedule below. Posting to Mastodon and
-Bluesky requires credentials for accounts the abuser must already control, so
-the worst case there is spamming their own timeline with our user agent
-attached.
+**The blast radius is already small.** One feed per account, one destination,
+at most five entries delivered per poll, six delivery attempts before a delivery
+is abandoned, and the poll schedule below. Posting uses the permission the
+abuser's own instance granted over their own account, so the worst case is
+spamming their own timeline with our user agent attached.
 
 If abuse becomes real rather than theoretical, the next step is invite codes —
 one setting and one column, and the only thing that actually gates who gets in.
@@ -237,6 +172,13 @@ request and discovery costs one more per candidate, capped at three.
 A linked address is written by whoever wrote the page, so it goes through the
 same guard as one typed into the form: `internal/safehttp` validates it, which
 is what stops a page from pointing this service at a link-local address.
+
+Adding a feed also makes sure the account has its destination, and does it
+before the subscription is written rather than after: a feed that existed for
+even a moment without one would be polled and published nowhere. An account
+whose stored authorisation cannot be read is told to sign out and back in, and
+the feed is not saved — a feed with nowhere to post is a schedule that produces
+nothing.
 
 ## Deliveries
 
@@ -261,10 +203,10 @@ climbs away from it, and the first new entry drops it straight back down.
 
 The ladder is in multiples rather than absolute durations, so setting a
 one-minute interval for development gets a one-minute service rather than one
-that quietly decides half an hour is close enough. A feed nobody has ticked a
-destination for is checked at 4× the floor at best: its entries are still
-recorded, so connecting something later starts from the right place, but nothing
-is waiting on a prompt answer.
+that quietly decides half an hour is close enough. A feed with nothing waiting on it — every
+subscriber paused, or their destination paused — is checked at 4× the floor at
+best: its entries are still recorded, so resuming starts from the right place,
+but nothing is waiting on a prompt answer.
 
 **A feed is fetched once, however many accounts follow it.** Feeds are shared,
 addressed by their URL rather than owned. The twentieth account to add a popular
@@ -329,8 +271,8 @@ their own pool: WAL lets them run against the last committed snapshot while a
 write is in flight, so a public `/stats` scan or one slow dashboard is no longer
 a queue for everybody.
 
-**Every outbound URL is untrusted.** Feed addresses, webhook endpoints, instance
-hostnames, and Bluesky PDS endpoints all come from users. `internal/safehttp`
+**Every outbound URL is untrusted.** Feed addresses, the pages they are
+discovered on, and instance hostnames all come from users. `internal/safehttp`
 validates the resolved IP inside the dialer, so a name that resolves to a public
 address at check time and a private one at connect time is still refused.
 
@@ -341,12 +283,13 @@ the server's record of the sign-in flow, never from a callback parameter.
 **One OAuth client per instance, one live token per account.** The client is
 registered on first use and cached against the callback it was registered with,
 so a change of `FR_BASE_URL` re-registers instead of failing at the instance
-forever. Each sign-in issues a new access token; the one it replaces is revoked
-once the new one is stored, and deleting an account revokes its token too.
-Otherwise an instance accumulates live credentials that can post as the user.
+forever. Each sign-in issues a new access token; the destination is re-sealed
+against it, then the one it replaces is revoked, and deleting an account revokes
+its token too. Otherwise an instance accumulates live credentials that can post
+as the user.
 
-**Secrets are encrypted per column.** Access tokens, app passwords, OAuth client
-secrets, and webhook keys are sealed with AES-GCM under purpose-bound keys
+**Secrets are encrypted per column.** Access tokens, the destination's copy of
+one, and OAuth client secrets are sealed with AES-GCM under purpose-bound keys
 derived from `FR_SECRET_KEY`, so a ciphertext cannot be moved between columns.
 
 **Retries are idempotent.** Mastodon posts carry an idempotency key derived from
@@ -371,6 +314,7 @@ review the changes*.
 
 ## Status
 
-Beta. One feed per account. No account limits beyond that, no billing.
+Beta. One feed per account, posting to the Mastodon account it signed in with.
+No account limits beyond that, no billing.
 
 Proprietary. All rights reserved. Not open source, not for redistribution.

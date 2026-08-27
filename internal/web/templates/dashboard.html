@@ -48,62 +48,44 @@
       <input type="hidden" name="csrf" value="{{$.CSRF}}">
       <label for="url">Feed address</label>
       <input type="url" id="url" name="url" value="{{$d.FeedURL}}" placeholder="https://example.com/feed.xml" required>
-      <p class="hint">The feed address, or the site itself if you do not know it. Checked every {{$d.Interval}}. Entries already in the feed when you add it are not posted.</p>
+      <p class="hint">The feed address, or the site itself if you do not know it. Checked every {{$d.Interval}}. New entries are posted to the account you signed in with; entries already in the feed when you add it are not.</p>
       <button type="submit" class="primary">Add feed</button>
     </form>
   {{end}}
 </section>
 
 <section>
-  <h2>Destinations</h2>
-  {{if and $d.Feed $d.Destinations}}
-  {{end}}
-  <form method="post" action="/feed/destinations">
-    <input type="hidden" name="csrf" value="{{$.CSRF}}">
-    <ul class="items">
-      {{range $d.Rows}}
-      <li>
-        {{if and .Dest $d.Feed}}
-          <input type="checkbox" id="dest-{{.Dest.ID}}" name="destination" value="{{.Dest.ID}}"{{if .Dest.Routed}} checked{{end}}>
-        {{else}}
-          <input type="checkbox" disabled aria-hidden="true">
-        {{end}}
-        {{if .Dest}}
-          <span>
-            {{if $d.Feed}}
-              <label class="item-name" for="dest-{{.Dest.ID}}">{{.Label}}</label>
-            {{else}}
-              <span class="item-name">{{.Label}}</span>
-            {{end}}
-            <span class="item-sub">
-              {{.Dest.Label}}
-              {{if .Dest.Paused}}· Paused
-              {{else if .Dest.LastError}}· <span class="bad">Last attempt failed</span>
-              {{else if .Dest.LastOKAt}}· Posted {{ago .Dest.LastOKAt}}{{end}}
-            </span>
-          </span>
-          <span class="item-state ok">Connected</span>
-          <a class="button" href="/destinations/{{.Dest.ID}}">Settings</a>
-        {{else}}
-          <span>
-            <span class="item-name">{{.Label}}</span>
-            <span class="item-sub">{{.Description}}</span>
-          </span>
-          <span class="item-state"></span>
-          <a class="button" href="/destinations/new?kind={{.Name}}">Connect</a>
-        {{end}}
-      </li>
-      {{end}}
-    </ul>
-    {{if $d.Feed}}
-      {{if and $d.Destinations (not $d.RoutedCount)}}
-        <p class="hint">Nothing is ticked, so new entries are recorded but not posted.</p>
-      {{end}}
-      <div class="row">
-        <button type="submit" class="primary">Save</button>
-      </div>
+  <h2>Posting</h2>
+  {{with $d.Destination}}
+    <p class="feed-name">{{acct .Label}}</p>
+    {{if .Paused}}
+      <p class="state is-paused">Paused</p>
+    {{else if .LastError}}
+      <p class="state is-failing">
+        Failing
+        <span class="sep">·</span>
+        <span class="measure">{{.LastError}}</span>
+      </p>
+    {{else if .LastOKAt}}
+      <p class="state">
+        Active
+        <span class="sep">·</span>
+        <span class="measure">posted {{ago .LastOKAt}}, as {{$d.Visibility}}</span>
+      </p>
+    {{else}}
+      <p class="state is-waiting">
+        Waiting for the first entry
+        <span class="sep">·</span>
+        <span class="measure">posts as {{$d.Visibility}}</span>
+      </p>
     {{end}}
-  </form>
+    <p class="hint">Your feed posts to the account you signed in with. Nothing to connect.</p>
+    <div class="row">
+      <a class="button" href="/destinations/{{.ID}}">Post settings</a>
+    </div>
+  {{else}}
+    <p class="hint">Posting is not set up yet. Sign out and back in, which reconnects your account.</p>
+  {{end}}
 </section>
 
 <section>

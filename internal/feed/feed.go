@@ -30,8 +30,8 @@ const (
 	MaxEntries    = 200
 
 	// MaxFeedBytes caps a feed document. The shared client allows five
-	// megabytes because a webhook or an instance API may legitimately answer
-	// with one, but a feed that size is a mistake or an attack: gofeed builds
+	// megabytes because an instance API may legitimately answer with one, but a
+	// feed that size is a mistake or an attack: gofeed builds
 	// the whole document in memory at several times its byte size, so the cap
 	// is really a cap on what one poll can allocate, multiplied by however many
 	// polls run at once.

@@ -31,7 +31,7 @@
 </form>
 
 <h2>Delete account</h2>
-<p>Removes your feed, destinations, history, and stored credentials. Posts already published stay where they are.</p>
+<p>Removes your feed, your posting settings, your history, and your stored credentials. Posts already published stay where they are.</p>
 <form method="post" action="/settings/delete" class="stack">
   <input type="hidden" name="csrf" value="{{.CSRF}}">
   <label for="confirm">Type <code>{{.User.Acct}}</code> to confirm</label>

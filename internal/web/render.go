@@ -49,10 +49,7 @@ var notices = map[string]string{
 	"feed-resumed":   "Feed resumed.",
 	"refreshing":     "Checking the feed now.",
 	"retrying":       "That post is queued to go out again.",
-	"routes-saved":   "Destinations updated.",
-	"dest-added":     "Destination added.",
-	"dest-saved":     "Destination saved.",
-	"dest-removed":   "Destination removed.",
+	"dest-saved":     "Post settings saved.",
 	"test-sent":      "Test post sent.",
 	"settings-saved": "Settings saved.",
 	"signed-out":     "Signed out.",
@@ -65,13 +62,12 @@ func (s *Server) parseTemplates() error {
 		"ago":       ago,
 		"due":       due,
 		"localtime": localtime,
-		"kindLabel": kindLabel,
 		"host":      hostOf,
 		"acct":      acct,
 	}
 
 	s.templates = map[string]*template.Template{}
-	for _, name := range []string{"index", "dashboard", "destination_new", "destination_edit", "settings", "faq", "terms", "logout", "error"} {
+	for _, name := range []string{"index", "dashboard", "destination_edit", "settings", "faq", "terms", "logout", "error"} {
 		t, err := template.New("layout.html").Funcs(funcs).
 			ParseFS(templateFS, "templates/layout.html", "templates/"+name+".html")
 		if err != nil {
@@ -242,26 +238,6 @@ func localtime(zone string, t any) string {
 		return localtime(zone, *x)
 	}
 	return ""
-}
-
-func kindLabel(kind string) string {
-	switch kind {
-	case "mastodon":
-		return "Mastodon"
-	case "bluesky":
-		return "Bluesky"
-	case "discord":
-		return "Discord"
-	case "slack":
-		return "Slack"
-	case "ntfy":
-		return "ntfy"
-	case "linkding":
-		return "linkding"
-	case "webhook":
-		return "Webhook"
-	}
-	return kind
 }
 
 // acct renders a fully-qualified account name so a proxy in front of us leaves

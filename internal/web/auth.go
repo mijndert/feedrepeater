@@ -5,12 +5,10 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"net/http"
 	"time"
 
-	"feedrepeater.com/internal/destination"
 	"feedrepeater.com/internal/mastodon"
 	"feedrepeater.com/internal/secret"
 	"feedrepeater.com/internal/store"
@@ -233,9 +231,13 @@ func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Signing in also refreshes the token held by the Mastodon destination for
-	// this same account, so a re-authorisation repairs a revoked one.
-	s.syncMastodonDestination(ctx, user, token)
+	// Signing in is also what connects this account to itself: the destination
+	// is made here if it does not exist, and re-sealed against the new token if
+	// it does, so re-authorising is the repair for one whose token was revoked.
+	// Failing is not fatal to the sign-in — adding a feed tries again.
+	if _, err := s.ensureMastodonDestination(ctx, user, token); err != nil {
+		s.log.Error("connect mastodon destination", "user", user.ID, "error", err)
+	}
 
 	// Only now, with nothing still relying on it, retire the old token. The
 	// instance would otherwise keep every token it has ever issued to this
@@ -257,39 +259,6 @@ func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	http.Redirect(w, r, "/dashboard", http.StatusSeeOther)
-}
-
-// syncMastodonDestination updates the stored token of the destination that
-// points at the account just signed in with.
-func (s *Server) syncMastodonDestination(ctx context.Context, user *store.User, token string) {
-	dests, err := s.store.DestinationsByUser(ctx, user.ID)
-	if err != nil {
-		return
-	}
-	for _, d := range dests {
-		if d.Kind != destination.KindMastodon {
-			continue
-		}
-		var cfg destination.MastodonConfig
-		if json.Unmarshal([]byte(d.Config), &cfg) != nil {
-			continue
-		}
-		if cfg.Host != user.Host || cfg.Acct != user.Acct {
-			continue
-		}
-		creds, err := json.Marshal(destination.MastodonCredentials{AccessToken: token})
-		if err != nil {
-			continue
-		}
-		sealed, err := s.keys.Encrypt(secret.PurposeDestination, creds)
-		if err != nil {
-			continue
-		}
-		d.Credentials = sealed
-		if err := s.store.UpdateDestination(ctx, d); err != nil {
-			s.log.Error("refresh destination token", "destination", d.ID, "error", err)
-		}
-	}
 }
 
 // handleLogoutConfirm asks before ending the session. Signing out is a POST

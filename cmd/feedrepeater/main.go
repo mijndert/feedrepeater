@@ -1,5 +1,4 @@
-// Command feedrepeater posts RSS and Atom entries to Mastodon, Bluesky,
-// Discord, Slack, ntfy, and webhooks.
+// Command feedrepeater posts RSS and Atom entries to Mastodon.
 package main
 
 import (
@@ -82,7 +81,7 @@ func run() error {
 
 	md := mastodon.New(hc)
 	fetcher := feed.NewFetcher(hc)
-	pub := publisher.New(st, keys, hc, md, log)
+	pub := publisher.New(st, keys, md, log)
 
 	// Built before the server so its Notify can be handed over: a handler that
 	// queues something says so directly, which is what lets the delivery loop

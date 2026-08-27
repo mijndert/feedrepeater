@@ -73,14 +73,14 @@ func TestUpsertUserIsIdentifiedByHostAndRemoteID(t *testing.T) {
 	}
 }
 
-// Databases written before the one-per-kind rule can hold duplicates, and the
-// unique index cannot be created over them. The migration keeps the oldest of
-// each kind, which is the one the account has been using.
-func TestMigrationDedupesDestinationsPerKind(t *testing.T) {
+// A database written before either rule can hold two webhooks for one account,
+// which the unique index cannot be created over, and rows of kinds this binary
+// no longer builds. Opening it has to survive the first and clear out the
+// second, in that order: dedupe, index, then delete what is left of the other
+// services.
+func TestMigrationLeavesOnlyMastodon(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "old.db")
 
-	// A database at the version before the rule existed, holding two webhooks
-	// for one account.
 	db, err := sql.Open("sqlite", "file:"+path+"?_pragma=foreign_keys(on)")
 	if err != nil {
 		t.Fatal(err)
@@ -96,10 +96,10 @@ func TestMigrationDedupesDestinationsPerKind(t *testing.T) {
 	if _, err := db.Exec(`
 		INSERT INTO users (id, host, remote_id, acct, access_token, created_at, last_login_at)
 		VALUES (1, 'example.social', 'alice-id', 'alice', x'00', unixepoch(), unixepoch());
-		INSERT INTO destinations (id, user_id, kind, label, created_at)
-		VALUES (1, 1, 'webhook', 'first', unixepoch()),
-		       (2, 1, 'webhook', 'second', unixepoch()),
-		       (3, 1, 'mastodon', 'toots', unixepoch());`); err != nil {
+		INSERT INTO destinations (id, user_id, kind, label, credentials, created_at)
+		VALUES (1, 1, 'webhook', 'first', x'0102', unixepoch()),
+		       (2, 1, 'webhook', 'second', x'0304', unixepoch()),
+		       (3, 1, 'mastodon', 'toots', x'0506', unixepoch());`); err != nil {
 		t.Fatal(err)
 	}
 	db.Close()
@@ -114,42 +114,37 @@ func TestMigrationDedupesDestinationsPerKind(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(list) != 2 {
-		t.Fatalf("account holds %d destinations after the migration, want 2", len(list))
+	if len(list) != 1 {
+		t.Fatalf("account holds %d destinations after the migration, want only the Mastodon one", len(list))
 	}
-	for _, d := range list {
-		if d.Kind == "webhook" && d.Label != "first" {
-			t.Errorf("the migration kept %q rather than the oldest webhook", d.Label)
-		}
+	if list[0].Kind != "mastodon" || list[0].Label != "toots" {
+		t.Errorf("survivor is %s/%q, want mastodon/\"toots\"", list[0].Kind, list[0].Label)
 	}
 }
 
-// One destination per kind has to hold in the database, not only in the
-// handler that checks before it: the handler's check and its insert are
-// separated by a webhook verification round trip, so concurrent requests all
-// pass it. Two accounts connecting the same service must still be fine.
+// One destination per kind has to hold in the database, not only in the code
+// that checks before inserting: that check and its insert are separated by a
+// round trip, so concurrent requests all pass it. Two tabs adding a feed at
+// once is the case that reaches this now. Two accounts connecting the same
+// service must still be fine.
 func TestOneDestinationPerKindIsEnforcedByTheDatabase(t *testing.T) {
 	st := testStore(t)
 	ctx := context.Background()
 	alice := testUser(t, st, "alice")
 	bob := testUser(t, st, "bob")
 
-	first := &Destination{UserID: alice.ID, Kind: "webhook", Label: "hook"}
+	first := &Destination{UserID: alice.ID, Kind: "mastodon", Label: "@alice@example.social"}
 	if err := st.CreateDestination(ctx, first); err != nil {
 		t.Fatal(err)
 	}
 
-	second := &Destination{UserID: alice.ID, Kind: "webhook", Label: "another hook"}
+	second := &Destination{UserID: alice.ID, Kind: "mastodon", Label: "@alice@example.social"}
 	if err := st.CreateDestination(ctx, second); !errors.Is(err, ErrDuplicateKind) {
-		t.Errorf("second webhook for one account = %v, want ErrDuplicateKind", err)
+		t.Errorf("second Mastodon destination for one account = %v, want ErrDuplicateKind", err)
 	}
 
-	// A different service for the same account, and the same service for a
-	// different account, are both untouched by the rule.
-	if err := st.CreateDestination(ctx, &Destination{UserID: alice.ID, Kind: "mastodon", Label: "toots"}); err != nil {
-		t.Errorf("second kind for one account: %v", err)
-	}
-	if err := st.CreateDestination(ctx, &Destination{UserID: bob.ID, Kind: "webhook", Label: "bob's hook"}); err != nil {
+	// The same service for a different account is untouched by the rule.
+	if err := st.CreateDestination(ctx, &Destination{UserID: bob.ID, Kind: "mastodon", Label: "@bob@example.social"}); err != nil {
 		t.Errorf("same kind for another account: %v", err)
 	}
 
@@ -158,8 +153,8 @@ func TestOneDestinationPerKindIsEnforcedByTheDatabase(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(list) != 2 {
-		t.Errorf("account holds %d destinations, want 2", len(list))
+	if len(list) != 1 {
+		t.Errorf("account holds %d destinations, want 1", len(list))
 	}
 }
 
@@ -171,7 +166,7 @@ func TestDestinationsAreScopedToTheirOwner(t *testing.T) {
 	alice := testUser(t, st, "alice")
 	mallory := testUser(t, st, "mallory")
 
-	d := &Destination{UserID: alice.ID, Kind: "webhook", Label: "Alice's hook", Template: "{{title}}"}
+	d := &Destination{UserID: alice.ID, Kind: "mastodon", Label: "@alice@example.social", Template: "{{title}}"}
 	if err := st.CreateDestination(ctx, d); err != nil {
 		t.Fatal(err)
 	}
@@ -179,10 +174,7 @@ func TestDestinationsAreScopedToTheirOwner(t *testing.T) {
 	if _, err := st.Destination(ctx, mallory.ID, d.ID); !errors.Is(err, ErrNotFound) {
 		t.Errorf("cross-tenant read succeeded: %v", err)
 	}
-	if err := st.DeleteDestination(ctx, mallory.ID, d.ID); !errors.Is(err, ErrNotFound) {
-		t.Errorf("cross-tenant delete succeeded: %v", err)
-	}
-	stolen := &Destination{ID: d.ID, UserID: mallory.ID, Kind: "webhook", Label: "taken"}
+	stolen := &Destination{ID: d.ID, UserID: mallory.ID, Kind: "mastodon", Label: "taken"}
 	if err := st.UpdateDestination(ctx, stolen); !errors.Is(err, ErrNotFound) {
 		t.Errorf("cross-tenant update succeeded: %v", err)
 	}
@@ -191,7 +183,7 @@ func TestDestinationsAreScopedToTheirOwner(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Label != "Alice's hook" {
+	if got.Label != "@alice@example.social" {
 		t.Errorf("owner's destination was modified: %q", got.Label)
 	}
 }
@@ -295,22 +287,30 @@ func TestInsertItemDeduplicatesByGUID(t *testing.T) {
 	}
 }
 
+// Pausing a destination stops posting without stopping reading, and queueing
+// the same entry twice must not post it twice. Two accounts on one feed, since
+// an account has one destination: alice's is paused, bob's is not.
 func TestQueueDeliveriesSkipsPausedAndIsIdempotent(t *testing.T) {
 	st := testStore(t)
 	ctx := context.Background()
 	alice := testUser(t, st, "alice")
-	f, _, _ := st.Subscribe(ctx, alice.ID, "https://example.com/feed.xml", "", nil, FetchState{NextFetchAt: time.Now().UTC()})
+	bob := testUser(t, st, "bob")
 
-	active := &Destination{UserID: alice.ID, Kind: "webhook", Label: "on"}
-	paused := &Destination{UserID: alice.ID, Kind: "mastodon", Label: "off"}
-	if err := st.CreateDestination(ctx, active); err != nil {
+	const url = "https://example.com/feed.xml"
+	f, _, _ := st.Subscribe(ctx, alice.ID, url, "", nil, FetchState{NextFetchAt: time.Now().UTC()})
+	if _, _, err := st.Subscribe(ctx, bob.ID, url, "", nil, FetchState{NextFetchAt: time.Now().UTC()}); err != nil {
 		t.Fatal(err)
 	}
+
+	paused := &Destination{UserID: alice.ID, Kind: "mastodon", Label: "off"}
 	if err := st.CreateDestination(ctx, paused); err != nil {
 		t.Fatal(err)
 	}
 	paused.Paused = true
 	if err := st.UpdateDestination(ctx, paused); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.CreateDestination(ctx, &Destination{UserID: bob.ID, Kind: "mastodon", Label: "on"}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -324,7 +324,7 @@ func TestQueueDeliveriesSkipsPausedAndIsIdempotent(t *testing.T) {
 		t.Fatal(err)
 	}
 	if n != 1 {
-		t.Errorf("queued %d deliveries, want 1 (paused destination should be skipped)", n)
+		t.Errorf("queued %d deliveries, want 1 (the paused destination should be skipped)", n)
 	}
 	again, err := st.QueueDeliveries(ctx, f.FeedID, item.ID)
 	if err != nil {
@@ -332,6 +332,9 @@ func TestQueueDeliveriesSkipsPausedAndIsIdempotent(t *testing.T) {
 	}
 	if again != 0 {
 		t.Errorf("re-queueing created %d duplicates", again)
+	}
+	if views, _ := st.RecentDeliveries(ctx, alice.ID, 10); len(views) != 0 {
+		t.Errorf("the paused account received %d deliveries", len(views))
 	}
 }
 
@@ -399,7 +402,7 @@ func TestDeleteUserCascades(t *testing.T) {
 	alice := testUser(t, st, "alice")
 
 	f, _, _ := st.Subscribe(ctx, alice.ID, "https://example.com/feed.xml", "", nil, FetchState{NextFetchAt: time.Now().UTC()})
-	d := &Destination{UserID: alice.ID, Kind: "webhook", Label: "hook"}
+	d := &Destination{UserID: alice.ID, Kind: "mastodon", Label: "@alice@example.social"}
 	if err := st.CreateDestination(ctx, d); err != nil {
 		t.Fatal(err)
 	}
@@ -452,7 +455,7 @@ func TestDeliveryTargetsRejectsOwnerMismatch(t *testing.T) {
 	if _, err := st.InsertItem(ctx, item); err != nil {
 		t.Fatal(err)
 	}
-	d := &Destination{UserID: mallory.ID, Kind: "webhook", Label: "mallory's"}
+	d := &Destination{UserID: mallory.ID, Kind: "mastodon", Label: "mallory's"}
 	if err := st.CreateDestination(ctx, d); err != nil {
 		t.Fatal(err)
 	}
@@ -639,7 +642,7 @@ func TestNewSubscriberDoesNotReceiveTheBacklog(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := st.CreateDestination(ctx, &Destination{
-		UserID: alice.ID, Kind: "webhook", Label: "alice's",
+		UserID: alice.ID, Kind: "mastodon", Label: "alice's",
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -660,7 +663,7 @@ func TestNewSubscriberDoesNotReceiveTheBacklog(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := st.CreateDestination(ctx, &Destination{
-		UserID: bob.ID, Kind: "webhook", Label: "bob's",
+		UserID: bob.ID, Kind: "mastodon", Label: "bob's",
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -691,7 +694,7 @@ func TestRecordEntriesCapsABurstAndStaysIdempotent(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := st.CreateDestination(ctx, &Destination{
-		UserID: alice.ID, Kind: "webhook", Label: "hook",
+		UserID: alice.ID, Kind: "mastodon", Label: "@alice@example.social",
 	}); err != nil {
 		t.Fatal(err)
 	}

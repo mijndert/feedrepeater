@@ -3,7 +3,7 @@
 
 <dl class="qa">
   <dt>What does feedrepeater do?</dt>
-  <dd>It watches an RSS or Atom feed and posts new entries to Mastodon, Bluesky, Discord, Slack, ntfy, linkding, and webhooks.</dd>
+  <dd>It watches an RSS or Atom feed and posts new entries to your Mastodon account.</dd>
 
   <dt>What address do I add?</dt>
   <dd>The feed's own address, or the site's. If the page you give links to a feed, that is the one saved.</dd>
@@ -14,41 +14,29 @@
   <dt>How often is my feed checked?</dt>
   <dd>Every {{.Data.Interval}}, whether or not it has been publishing. The rate never slows down during the beta.</dd>
 
-  <dt>How many feeds and destinations do I get?</dt>
-  <dd>One feed during the beta, and one destination per service: a Mastodon account, a Bluesky account, a Discord channel, a Slack channel, an ntfy topic, a linkding, and a webhook. Untick one on the dashboard to stop publishing to it without disconnecting it.</dd>
+  <dt>How many feeds do I get, and where do they post?</dt>
+  <dd>One feed during the beta, and it posts to the Mastodon account you signed in with. There is nothing to connect and nothing to choose: the account is already known, so adding a feed is the whole setup.</dd>
+
+  <dt>Can I post somewhere else?</dt>
+  <dd>Not at the moment. Bluesky, Discord, Slack, ntfy, linkding and signed webhooks were all here and were removed to keep one thing working well. If you were using one, its settings and its stored credentials have been deleted.</dd>
 
   <dt>What if a feed publishes a lot at once?</dt>
   <dd>At most {{.Data.MaxItems}} entries are posted per check. The rest are recorded as seen, so a feed that renumbers its ids cannot flood your timeline.</dd>
 
   <dt>Why sign in with Mastodon?</dt>
-  <dd>It is the account you post from, so it also serves as your identity here. Any instance works. Your password is never sent to feedrepeater: the instance grants permission to read your account and post statuses, and deleting your account revokes it.</dd>
-
-  <dt>How do Discord and Slack connect?</dt>
-  <dd>With a webhook URL you create in the channel. That URL is all it takes to post there, so it is stored encrypted and never shown again; replace it here or revoke it in the channel's settings. Discord is checked without posting anything. Slack offers no way to check a webhook without using it, so connecting posts one line to the channel.</dd>
-
-  <dt>Why does Bluesky need an app password?</dt>
-  <dd>Use an app password from your Bluesky settings, not your account password. It is stored encrypted, and you can revoke it from Bluesky at any time.</dd>
-
-  <dt>How does ntfy connect?</dt>
-  <dd>Install ntfy on your phone, subscribe to a topic, and give the topic name here. On ntfy.sh a topic is open to anyone who guesses its name, so pick one nobody would. Your own server works too: we ask it for <code>/v1/health</code> first, so an address that is not an ntfy server cannot be pointed at from here. There is no way to check a topic without using it, so connecting publishes one notification. An access token is needed only for a reserved topic or a server that asks for one, and is stored encrypted.</dd>
-
-  <dt>How does linkding connect?</dt>
-  <dd>Give the address your own <a href="https://linkding.link" rel="noreferrer nofollow">linkding</a> is served from and a REST API token from its Settings, Integrations page. We read your linkding profile with that token when you save, which proves the address and the token together without creating a bookmark. The token is stored encrypted and never shown again. Each entry becomes a bookmark: its link and title are its own, the post text is the description, and you choose the tags and whether it arrives unread.</dd>
-
-  <dt>What does a webhook receive?</dt>
-  <dd>A JSON POST signed with HMAC-SHA256 under a secret shown once when you add the destination. The address has to echo back a challenge before it is saved, and again if you change it.</dd>
+  <dd>It is the account you post from, so it also serves as your identity here — which is why nothing has to be connected afterwards. Any instance works. Your password is never sent to feedrepeater: the instance grants permission to read your account and post statuses, and deleting your account revokes it.</dd>
 
   <dt>Can I change the post text?</dt>
-  <dd>Every destination has its own template with a fixed set of placeholders: <code>{{"{{title}} {{url}} {{summary}} {{author}} {{feed_title}} {{published}}"}}</code>. Text is trimmed to each service's limit by shortening the summary first, then the title. The link is never cut. Settings holds a default that new destinations start from, so wording is typed once; changing it leaves destinations you already have alone.</dd>
+  <dd>Yes, under Post settings, with a fixed set of placeholders: <code>{{"{{title}} {{url}} {{summary}} {{author}} {{feed_title}} {{published}}"}}</code>. Text is trimmed to your instance's post length by shortening the summary first, then the title. The link is never cut. Settings holds a default that a new account starts from; changing it later leaves what you already have alone.</dd>
 
   <dt>Which timezone are dates in?</dt>
   <dd>UTC, until you name one in Settings. It sets the dates shown here and the day <code>{{"{{published}}"}}</code> renders, which matters at the edges of a day: an entry published at 23:00 in Amsterdam is the next day's date in UTC.</dd>
 
   <dt>What happens when something fails?</dt>
-  <dd>A failed post is retried with a growing delay before it is abandoned, and one that has given up has a Retry button on your dashboard. A feed that keeps failing is still tried on the same schedule, unless its server asks for room, and is paused after about two weeks of it, with the reason on your dashboard.</dd>
+  <dd>A failed post is retried with a growing delay before it is abandoned, and one that has given up has a Retry button on your dashboard. If your instance stops accepting the authorisation, signing out and back in issues a new one and repairs it. A feed that keeps failing is still tried on the same schedule, unless its server asks for room, and is paused after about two weeks of it, with the reason on your dashboard.</dd>
 
   <dt>What is stored, and how do I remove it?</dt>
-  <dd>Your feed, the entries read from it, delivery history, and the credentials for your destinations. Credentials are encrypted. Deleting your account in Settings removes all of it. Posts already published stay where they are.</dd>
+  <dd>Your feed, the entries read from it, delivery history, and the authorisation your instance granted for posting. Credentials are encrypted. Deleting your account in Settings removes all of it and revokes that authorisation. Posts already published stay where they are.</dd>
 
   <dt>What does it cost?</dt>
   <dd>Nothing. There is no billing during the beta.</dd>

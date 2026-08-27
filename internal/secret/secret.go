@@ -17,7 +17,8 @@ import (
 
 // Purpose binds a ciphertext to the column it lives in. A value encrypted as
 // one purpose will not decrypt as another, so a database write primitive
-// cannot be used to move a webhook secret into an OAuth client secret slot.
+// cannot be used to move a destination credential into an OAuth client
+// secret slot.
 type Purpose string
 
 const (
@@ -123,8 +124,8 @@ func Token() string {
 	return base64.RawURLEncoding.EncodeToString(b)
 }
 
-// Hash returns the hex SHA-256 of a token. Session and webhook tokens are
-// stored hashed so a database leak does not hand over live credentials.
+// Hash returns the hex SHA-256 of a token. Session tokens are stored hashed so
+// a database leak does not hand over live credentials.
 func Hash(token string) string {
 	sum := sha256.Sum256([]byte(token))
 	return hex.EncodeToString(sum[:])

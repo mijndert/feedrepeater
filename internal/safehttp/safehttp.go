@@ -1,7 +1,8 @@
 // Package safehttp provides an HTTP client for fetching user-supplied URLs.
 //
-// Every URL this service touches — feeds, webhooks, Mastodon instances, Bluesky
-// PDS endpoints — is chosen by an untrusted user, so the client refuses to
+// Every URL this service touches — feed addresses, the pages they are
+// discovered on, Mastodon instances — is chosen by an untrusted user, so the
+// client refuses to
 // connect to anything that is not a public address, refuses non-HTTP schemes,
 // re-checks every redirect hop, and caps how much it will read.
 package safehttp

@@ -18,17 +18,29 @@ import (
 type dashboardData struct {
 	Feed    *store.FeedView
 	FeedURL string
-	// Destinations carries every destination the account owns, each marked
-	// with whether the feed publishes to it.
-	Destinations []*store.RoutedDestination
+	// Destination is where the feed is published: the Mastodon account this
+	// person signed in with. It is made when the feed is added rather than
+	// chosen, so the dashboard states it instead of offering it.
+	Destination *store.Destination
 	// Activity is delivery history folded into one line per entry.
 	Activity []activityEntry
 	// ActivityMore says history was cut off, so the list can admit it rather
 	// than looking like everything there is.
 	ActivityMore bool
 	Pending      int
-	Kinds        []destination.Kind
 	Interval     string
+}
+
+// Visibility is how the destination posts, for the line under the account.
+func (d dashboardData) Visibility() string {
+	if d.Destination == nil {
+		return ""
+	}
+	cfg, err := decodeConfig[destination.MastodonConfig](d.Destination.Config)
+	if err != nil {
+		return ""
+	}
+	return cfg.Visibility
 }
 
 // The activity list is capped in entries, not deliveries.
@@ -42,11 +54,13 @@ type dashboardData struct {
 // activityRows is what is read to build them — enough for the cap even when
 // every entry went everywhere, with room for the trailing group that gets
 // dropped below.
-const activityEntries = 10
-
-// Kinds is a slice, so this is a var rather than a const; it is fixed at start
-// and never written.
-var activityRows = activityEntries*len(destination.Kinds) + 10
+const (
+	activityEntries = 10
+	// One destination per account is one delivery per entry, so the read is the
+	// cap plus the row that says there is more behind it. It was ten times the
+	// number of services when an account could have seven of them.
+	activityRows = activityEntries + 1
+)
 
 // activityEntry is one entry and every delivery of it.
 type activityEntry struct {
@@ -117,61 +131,9 @@ func (s *Server) recentActivity(ctx context.Context, userID int64) ([]activityEn
 	return entries, more, nil
 }
 
-// kindRow is one line of the destinations list: a service, and the account's
-// destination for it once there is one.
-type kindRow struct {
-	destination.Kind
-	Dest *store.RoutedDestination
-}
-
-// Rows lists every kind in display order, carrying the destination connected
-// to it. An account has at most one per kind, so the list is the same length
-// whatever the account has done. A duplicate left by older data would not fit
-// that shape, so it gets a row to itself rather than disappearing.
-func (d dashboardData) Rows() []kindRow {
-	rows := make([]kindRow, 0, len(d.Kinds))
-	taken := make(map[int64]bool, len(d.Destinations))
-	for _, k := range d.Kinds {
-		row := kindRow{Kind: k}
-		for _, dest := range d.Destinations {
-			if dest.Kind == k.Name {
-				row.Dest = dest
-				taken[dest.ID] = true
-				break
-			}
-		}
-		rows = append(rows, row)
-	}
-	for _, dest := range d.Destinations {
-		if taken[dest.ID] {
-			continue
-		}
-		kind, ok := destination.KindByName(dest.Kind)
-		if !ok {
-			kind = destination.Kind{Name: dest.Kind, Label: kindLabel(dest.Kind)}
-		}
-		rows = append(rows, kindRow{Kind: kind, Dest: dest})
-	}
-	return rows
-}
-
-// RoutedCount reports how many destinations the feed publishes to.
-func (d dashboardData) RoutedCount() int {
-	n := 0
-	for _, dest := range d.Destinations {
-		if dest.Routed && !dest.Paused {
-			n++
-		}
-	}
-	return n
-}
-
 func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	user := userFrom(r)
-	data := dashboardData{
-		Kinds:    destination.Kinds,
-		Interval: humanInterval(s.cfg.MinPollInterval),
-	}
+	data := dashboardData{Interval: humanInterval(s.cfg.MinPollInterval)}
 
 	f, err := s.store.FeedByUser(r.Context(), user.ID)
 	if err == nil {
@@ -181,9 +143,7 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		s.log.Error("load feed", "error", err)
 	}
 
-	if data.Destinations, err = s.routedDestinations(r.Context(), user.ID, data.Feed); err != nil {
-		s.log.Error("load destinations", "error", err)
-	}
+	data.Destination = s.destinationOfKind(r.Context(), user.ID, destination.KindMastodon)
 	if data.Activity, data.ActivityMore, err = s.recentActivity(r.Context(), user.ID); err != nil {
 		s.log.Error("load deliveries", "error", err)
 	}
@@ -279,6 +239,22 @@ func (s *Server) handleFeedSave(w http.ResponseWriter, r *http.Request) {
 		BodyHash:     res.BodyHash,
 		NextFetchAt:  now.Add(s.cfg.MinPollInterval),
 	}
+
+	// Where this feed publishes is not a question with two answers: it is the
+	// Mastodon account this person signed in with, and it is connected here
+	// rather than asked for. Before Subscribe, because Subscribe attaches a new
+	// feed to the destinations that already exist — after it, there would be a
+	// window in which the feed was polled and published nowhere.
+	//
+	// Almost always this finds the destination made at sign-in and does
+	// nothing. It matters for the account that predates that, or whose
+	// destination could not be written then.
+	if _, err := s.ensureMastodonDestination(ctx, user, ""); err != nil {
+		s.log.Error("connect mastodon destination", "user", user.ID, "error", err)
+		s.dashboardError(w, r, "Your feed was not added: posting to your Mastodon account could not be set up. Sign out, sign back in, and try again.", raw)
+		return
+	}
+
 	if _, _, err := s.store.Subscribe(r.Context(), user.ID, feedURL, res.Title, seed, state); err != nil {
 		s.log.Error("save feed", "error", err)
 		s.fail(w, r, http.StatusInternalServerError, "Something went wrong.")
@@ -294,11 +270,11 @@ func (s *Server) handleFeedSave(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) dashboardError(w http.ResponseWriter, r *http.Request, msg, feedURL string) {
 	user := userFrom(r)
-	data := dashboardData{Kinds: destination.Kinds, Interval: humanInterval(s.cfg.MinPollInterval), FeedURL: feedURL}
+	data := dashboardData{Interval: humanInterval(s.cfg.MinPollInterval), FeedURL: feedURL}
 	if f, err := s.store.FeedByUser(r.Context(), user.ID); err == nil {
 		data.Feed = f
 	}
-	data.Destinations, _ = s.routedDestinations(r.Context(), user.ID, data.Feed)
+	data.Destination = s.destinationOfKind(r.Context(), user.ID, destination.KindMastodon)
 	data.Activity, data.ActivityMore, _ = s.recentActivity(r.Context(), user.ID)
 	s.render(w, r, http.StatusBadRequest, "dashboard", page{Title: "feedrepeater", Error: msg, Data: data})
 }
@@ -342,218 +318,19 @@ func (s *Server) handleFeedDelete(w http.ResponseWriter, r *http.Request) {
 	redirect(w, r, "/dashboard", "feed-removed")
 }
 
-// routedDestinations lists the account's destinations, marked with whether the
-// feed publishes to them. With no feed yet, none are marked.
-func (s *Server) routedDestinations(ctx context.Context, userID int64, f *store.FeedView) ([]*store.RoutedDestination, error) {
-	if f != nil {
-		return s.store.DestinationsForFeed(ctx, userID, f.ID)
-	}
-	plain, err := s.store.DestinationsByUser(ctx, userID)
-	if err != nil {
-		return nil, err
-	}
-	out := make([]*store.RoutedDestination, 0, len(plain))
-	for _, d := range plain {
-		out = append(out, &store.RoutedDestination{Destination: *d})
-	}
-	return out, nil
-}
-
-// handleFeedRoutes saves which destinations the feed publishes to. Submitted
-// ids are filtered against the account's own destinations in the store, so an
-// id belonging to someone else is simply not attached.
-func (s *Server) handleFeedRoutes(w http.ResponseWriter, r *http.Request) {
-	user := userFrom(r)
-	f, err := s.store.FeedByUser(r.Context(), user.ID)
-	if err != nil {
-		redirect(w, r, "/dashboard", "")
-		return
-	}
-
-	var ids []int64
-	for _, raw := range r.PostForm["destination"] {
-		id, err := strconv.ParseInt(raw, 10, 64)
-		if err != nil {
-			continue
-		}
-		ids = append(ids, id)
-	}
-	if len(ids) > 100 {
-		ids = ids[:100]
-	}
-
-	if err := s.store.SetFeedRoutes(r.Context(), user.ID, f.ID, ids); err != nil {
-		s.log.Error("save routes", "feed", f.ID, "error", err)
-		s.fail(w, r, http.StatusInternalServerError, "Something went wrong.")
-		return
-	}
-	redirect(w, r, "/dashboard", "routes-saved")
-}
-
 // --- destinations ----------------------------------------------------------
 
 type destinationForm struct {
-	Kind         destination.Kind
 	Dest         *store.Destination
 	Label        string
 	Template     string
 	Visibility   string
-	Handle       string
-	URL          string
-	Server       string
-	Topic        string
-	Priority     int
-	Tags         string
-	Unread       bool
 	Account      string
 	Paused       bool
-	NewSecret    string
 	Variables    []render.Variable
 	Visibilities []string
-	Priorities   []destination.NtfyPriority
 	Preview      string
 	Limit        int
-}
-
-func (s *Server) handleDestinationNew(w http.ResponseWriter, r *http.Request) {
-	kind, ok := destination.KindByName(r.URL.Query().Get("kind"))
-	if !ok {
-		http.Redirect(w, r, "/dashboard", http.StatusSeeOther)
-		return
-	}
-	user := userFrom(r)
-	// One destination per kind, so a kind already connected has nothing to add.
-	// Sending them to the one they have beats a form that cannot be submitted.
-	if d := s.destinationOfKind(r.Context(), user.ID, kind.Name); d != nil {
-		http.Redirect(w, r, "/destinations/"+strconv.FormatInt(d.ID, 10), http.StatusSeeOther)
-		return
-	}
-	form := destinationForm{
-		Kind:  kind,
-		Label: defaultLabel(kind.Name, user),
-		// The account's own default wins over the kind's, which is the whole
-		// point of setting one; a kind that wants something different still gets
-		// it when the account has expressed no preference.
-		Template:     nonEmpty(user.DefaultTemplate, kind.DefaultTemplate),
-		Account:      user.Handle(),
-		Variables:    render.Variables,
-		Visibilities: destination.Visibilities,
-		Visibility:   "public",
-		Priorities:   destination.NtfyPriorities,
-		Priority:     destination.DefaultNtfyPriority,
-	}
-	switch kind.Name {
-	case destination.KindNtfy:
-		// The hosted service is where most people's phone is subscribed. Only ntfy
-		// has a default address: a linkding is somebody's own server and nobody
-		// else's, so that field starts empty.
-		form.Server = destination.DefaultNtfyServer
-	case destination.KindLinkding:
-		// A feed arriving as a bookmark is a reading list, so it starts unread.
-		// linkding's own default is read, which for entries nobody has seen yet
-		// would be a claim rather than a state.
-		form.Unread = true
-	}
-	s.render(w, r, http.StatusOK, "destination_new", page{Title: "Add destination", Data: form})
-}
-
-func (s *Server) handleDestinationCreate(w http.ResponseWriter, r *http.Request) {
-	user := userFrom(r)
-	kind, ok := destination.KindByName(r.PostFormValue("kind"))
-	if !ok {
-		s.fail(w, r, http.StatusBadRequest, "Unknown destination type.")
-		return
-	}
-	// One destination per kind. This check is for the message: the unique index
-	// behind CreateDestination is what actually holds the rule, since between
-	// here and the insert sits a network round trip. It runs before the rate
-	// limiter so a duplicate does not spend write budget it never uses.
-	if d := s.destinationOfKind(r.Context(), user.ID, kind.Name); d != nil {
-		s.fail(w, r, http.StatusBadRequest, "You already have a "+kind.Label+" destination. Edit that one instead.")
-		return
-	}
-	if !s.writeLimit.allow("dest:" + strconv.FormatInt(user.ID, 10)) {
-		s.fail(w, r, http.StatusTooManyRequests, "Too many changes. Try again later.")
-		return
-	}
-
-	form := destinationForm{
-		Kind:         kind,
-		Label:        strings.TrimSpace(r.PostFormValue("label")),
-		Template:     r.PostFormValue("template"),
-		Visibility:   r.PostFormValue("visibility"),
-		Handle:       strings.TrimSpace(r.PostFormValue("handle")),
-		URL:          strings.TrimSpace(r.PostFormValue("url")),
-		Server:       strings.TrimSpace(r.PostFormValue("server")),
-		Topic:        strings.TrimSpace(r.PostFormValue("topic")),
-		Priority:     formPriority(r),
-		Tags:         strings.TrimSpace(r.PostFormValue("tags")),
-		Unread:       r.PostFormValue("unread") == "1",
-		Account:      user.Handle(),
-		Variables:    render.Variables,
-		Visibilities: destination.Visibilities,
-		Priorities:   destination.NtfyPriorities,
-	}
-	if form.Label == "" {
-		form.Label = defaultLabel(kind.Name, user)
-	}
-	if err := render.ValidateTemplate(form.Template); err != nil {
-		s.destinationFormError(w, r, "destination_new", form, err.Error())
-		return
-	}
-
-	d := &store.Destination{
-		UserID:   user.ID,
-		Kind:     kind.Name,
-		Label:    clipLabel(form.Label),
-		Template: form.Template,
-	}
-
-	ctx, cancel := context.WithTimeout(r.Context(), 25*time.Second)
-	defer cancel()
-
-	var newSecret string
-	var err error
-	switch kind.Name {
-	case destination.KindMastodon:
-		err = s.configureMastodon(ctx, user, d, form.Visibility)
-	case destination.KindBluesky:
-		err = s.configureBluesky(ctx, d, form.Handle, r.PostFormValue("app_password"))
-	case destination.KindDiscord:
-		err = s.configureDiscord(ctx, d, form.URL)
-	case destination.KindSlack:
-		err = s.configureSlack(ctx, d, form.URL)
-	case destination.KindNtfy:
-		err = s.configureNtfy(ctx, d, form.Server, form.Topic, r.PostFormValue("token"), form.Priority, true)
-	case destination.KindLinkding:
-		err = s.configureLinkding(ctx, d, form.Server, r.PostFormValue("token"), form.Tags, form.Unread, true)
-	case destination.KindWebhook:
-		newSecret, err = s.configureWebhook(ctx, d, form.URL)
-	}
-	if err != nil {
-		s.destinationFormError(w, r, "destination_new", form, err.Error())
-		return
-	}
-
-	if err := s.store.CreateDestination(r.Context(), d); err != nil {
-		// Two requests for the same kind raced and this one lost. The
-		// credentials it just verified are not stored, so nothing is left
-		// behind to clean up.
-		if errors.Is(err, store.ErrDuplicateKind) {
-			s.fail(w, r, http.StatusBadRequest, "You already have a "+kind.Label+" destination. Edit that one instead.")
-			return
-		}
-		s.log.Error("create destination", "error", err)
-		s.fail(w, r, http.StatusInternalServerError, "Something went wrong.")
-		return
-	}
-
-	if newSecret == "" {
-		redirect(w, r, "/destinations/"+strconv.FormatInt(d.ID, 10), "dest-added")
-		return
-	}
-	// The signing secret is shown once, on this response, and never again.
-	s.renderDestinationEdit(w, r, d, newSecret, "")
 }
 
 func (s *Server) handleDestinationEdit(w http.ResponseWriter, r *http.Request) {
@@ -561,7 +338,7 @@ func (s *Server) handleDestinationEdit(w http.ResponseWriter, r *http.Request) {
 	if d == nil {
 		return
 	}
-	s.renderDestinationEdit(w, r, d, "", "")
+	s.renderDestinationEdit(w, r, d, "")
 }
 
 func (s *Server) handleDestinationUpdate(w http.ResponseWriter, r *http.Request) {
@@ -571,9 +348,8 @@ func (s *Server) handleDestinationUpdate(w http.ResponseWriter, r *http.Request)
 	}
 	user := userFrom(r)
 
-	// Updating can re-resolve a Bluesky handle and open a session against a
-	// server the user named, so it reaches third parties just as creating does
-	// and needs the same limit.
+	// Saving writes nothing to the instance, but it is still a write here and
+	// the limiter is what keeps a held-down key from being a workload.
 	if !s.writeLimit.allow("dest:" + strconv.FormatInt(user.ID, 10)) {
 		s.fail(w, r, http.StatusTooManyRequests, "Too many changes. Try again later.")
 		return
@@ -586,139 +362,18 @@ func (s *Server) handleDestinationUpdate(w http.ResponseWriter, r *http.Request)
 	tmpl := r.PostFormValue("template")
 	if err := render.ValidateTemplate(tmpl); err != nil {
 		d.Label, d.Template = label, tmpl
-		s.renderDestinationEdit(w, r, d, "", err.Error())
+		s.renderDestinationEdit(w, r, d, err.Error())
 		return
 	}
 	d.Label = label
 	d.Template = tmpl
 	d.Paused = r.PostFormValue("paused") == "1"
 
-	ctx, cancel := context.WithTimeout(r.Context(), 25*time.Second)
-	defer cancel()
-
-	switch d.Kind {
-	case destination.KindMastodon:
-		if v := r.PostFormValue("visibility"); destination.ValidVisibility(v) {
-			cfg, _ := decodeConfig[destination.MastodonConfig](d.Config)
-			cfg.Visibility = v
-			if err := s.setConfig(d, cfg); err != nil {
-				s.fail(w, r, http.StatusInternalServerError, "Something went wrong.")
-				return
-			}
-		}
-	case destination.KindBluesky:
-		// An app password is only replaced when a new one is supplied.
-		if pass := r.PostFormValue("app_password"); strings.TrimSpace(pass) != "" {
-			cfg, _ := decodeConfig[destination.BlueskyConfig](d.Config)
-			if err := s.configureBluesky(ctx, d, cfg.Handle, pass); err != nil {
-				s.renderDestinationEdit(w, r, d, "", err.Error())
-				return
-			}
-		}
-	case destination.KindDiscord:
-		// As with a Bluesky app password, the URL is only replaced when a new
-		// one is given, and the new one is verified before it is stored.
-		if u := strings.TrimSpace(r.PostFormValue("url")); u != "" {
-			if err := s.configureDiscord(ctx, d, u); err != nil {
-				s.renderDestinationEdit(w, r, d, "", err.Error())
-				return
-			}
-		}
-	case destination.KindSlack:
-		if u := strings.TrimSpace(r.PostFormValue("url")); u != "" {
-			if err := s.configureSlack(ctx, d, u); err != nil {
-				s.renderDestinationEdit(w, r, d, "", err.Error())
-				return
-			}
-		}
-	case destination.KindNtfy:
-		// Server, topic and priority are not secrets, so the form carries them
-		// whole and they are applied as given. The token is, so an empty field
-		// means "keep the stored one" unless the box asking to drop it is ticked.
-		prev, _ := decodeConfig[destination.NtfyConfig](d.Config)
-		stored := s.storedNtfyToken(d)
-		token := strings.TrimSpace(r.PostFormValue("token"))
-		if token == "" && r.PostFormValue("clear_token") != "1" {
-			token = stored
-		}
-		server := strings.TrimSpace(r.PostFormValue("server"))
-		topic := strings.TrimSpace(r.PostFormValue("topic"))
-
-		// Where a post goes has to prove itself again when it moves; a template
-		// or priority edit does not, because verification publishes a
-		// notification and nobody wants one for changing a word. The server is
-		// compared normalised, so "ntfy.sh" and "https://ntfy.sh/" are the same
-		// address rather than a change.
-		normalised := ""
-		if u, err := destination.ParseNtfyServer(server); err == nil {
-			normalised = u.String()
-		}
-		moved := normalised != prev.Server || topic != prev.Topic || token != stored
-
-		if err := s.configureNtfy(ctx, d, server, topic, token, formPriority(r), moved); err != nil {
-			s.renderDestinationEdit(w, r, d, "", err.Error())
-			return
-		}
-	case destination.KindLinkding:
-		// The address, the tags and the unread flag are not secrets, so the form
-		// carries them whole. The token is, so an empty field means "keep the
-		// stored one" — and unlike ntfy's there is no way to remove it, because a
-		// linkding destination without a token cannot write anything.
-		prev, _ := decodeConfig[destination.LinkdingConfig](d.Config)
-		stored := s.storedLinkdingToken(d)
-		token := strings.TrimSpace(r.PostFormValue("token"))
-		if token == "" {
-			token = stored
-		}
-		server := strings.TrimSpace(r.PostFormValue("server"))
-
-		// Where a bookmark goes proves itself again when it moves. Compared
-		// normalised, so "linkding.example" and "https://linkding.example/" are the
-		// same address rather than a change.
-		normalised := ""
-		if u, err := destination.ParseLinkdingServer(server); err == nil {
-			normalised = u.String()
-		}
-		moved := normalised != prev.Server || token != stored
-
-		if err := s.configureLinkding(ctx, d, server, token,
-			strings.TrimSpace(r.PostFormValue("tags")), r.PostFormValue("unread") == "1", moved); err != nil {
-			s.renderDestinationEdit(w, r, d, "", err.Error())
-			return
-		}
-	case destination.KindWebhook:
-		if u := strings.TrimSpace(r.PostFormValue("url")); u != "" {
-			cfg, _ := decodeConfig[destination.WebhookConfig](d.Config)
-			if u != cfg.URL {
-				// A new address is a new endpoint and has to prove itself the
-				// same way the original did. It is verified against a fresh
-				// secret, which is then the one that stays.
-				secretValue, err := s.configureWebhook(ctx, d, u)
-				if err != nil {
-					s.renderDestinationEdit(w, r, d, "", err.Error())
-					return
-				}
-				if err := s.store.UpdateDestination(r.Context(), d); err != nil {
-					s.log.Error("update destination", "error", err)
-					s.fail(w, r, http.StatusInternalServerError, "Something went wrong.")
-					return
-				}
-				s.renderDestinationEdit(w, r, d, secretValue, "")
-				return
-			}
-		}
-		if r.PostFormValue("rotate") == "1" {
-			secretValue, err := s.newWebhookSecret(d)
-			if err != nil {
-				s.fail(w, r, http.StatusInternalServerError, "Something went wrong.")
-				return
-			}
-			if err := s.store.UpdateDestination(r.Context(), d); err != nil {
-				s.log.Error("update destination", "error", err)
-				s.fail(w, r, http.StatusInternalServerError, "Something went wrong.")
-				return
-			}
-			s.renderDestinationEdit(w, r, d, secretValue, "")
+	if v := r.PostFormValue("visibility"); destination.ValidVisibility(v) {
+		cfg, _ := decodeConfig[destination.MastodonConfig](d.Config)
+		cfg.Visibility = v
+		if err := s.setConfig(d, cfg); err != nil {
+			s.fail(w, r, http.StatusInternalServerError, "Something went wrong.")
 			return
 		}
 	}
@@ -735,17 +390,6 @@ func (s *Server) handleDestinationUpdate(w http.ResponseWriter, r *http.Request)
 	redirect(w, r, "/destinations/"+strconv.FormatInt(d.ID, 10), "dest-saved")
 }
 
-func (s *Server) handleDestinationDelete(w http.ResponseWriter, r *http.Request) {
-	d := s.destinationFromPath(w, r)
-	if d == nil {
-		return
-	}
-	if err := s.store.DeleteDestination(r.Context(), d.UserID, d.ID); err != nil {
-		s.log.Error("delete destination", "error", err)
-	}
-	redirect(w, r, "/dashboard", "dest-removed")
-}
-
 func (s *Server) handleDestinationTest(w http.ResponseWriter, r *http.Request) {
 	d := s.destinationFromPath(w, r)
 	if d == nil {
@@ -753,7 +397,7 @@ func (s *Server) handleDestinationTest(w http.ResponseWriter, r *http.Request) {
 	}
 	user := userFrom(r)
 	if !s.writeLimit.allow("test:" + strconv.FormatInt(user.ID, 10)) {
-		s.renderDestinationEdit(w, r, d, "", "Too many test posts. Try again later.")
+		s.renderDestinationEdit(w, r, d, "Too many test posts. Try again later.")
 		return
 	}
 
@@ -763,7 +407,7 @@ func (s *Server) handleDestinationTest(w http.ResponseWriter, r *http.Request) {
 	item := s.sampleItem(ctx, user)
 	if _, err := s.pub.Send(ctx, d, item, user.Location(), "test-"+strconv.FormatInt(time.Now().UnixNano(), 36)); err != nil {
 		s.log.Info("test post failed", "destination", d.ID, "error", err)
-		s.renderDestinationEdit(w, r, d, "", "Test post failed: "+clip(err.Error(), 300))
+		s.renderDestinationEdit(w, r, d, "Test post failed: "+clip(err.Error(), 300))
 		return
 	}
 	redirect(w, r, "/destinations/"+strconv.FormatInt(d.ID, 10), "test-sent")
@@ -996,25 +640,11 @@ func (s *Server) renderInfo(w http.ResponseWriter, r *http.Request, name, title 
 	s.render(w, r, http.StatusOK, name, p)
 }
 
-// indexData is what the front page states about the service.
-//
-// Kinds comes from the destination registry rather than from a sentence typed
-// into the template. The page that names every supported service is the one place
-// a new service is easiest to forget, and the list that sells the thing had
-// already fallen a service behind before this existed.
-type indexData struct {
-	Kinds []destination.Kind
-}
-
 // renderIndex draws the sign-in page. Sign-in fails in several ways and each
 // one lands back here, so they share an entry point rather than repeating what
 // the page needs.
 func (s *Server) renderIndex(w http.ResponseWriter, r *http.Request, status int, message string) {
-	s.render(w, r, status, "index", page{
-		Title: "feedrepeater",
-		Error: message,
-		Data:  indexData{Kinds: destination.Kinds},
-	})
+	s.render(w, r, status, "index", page{Title: "feedrepeater", Error: message})
 }
 
 // infoData collects the numbers a page states about how the service behaves.
@@ -1071,32 +701,13 @@ func (s *Server) sampleItem(ctx context.Context, user *store.User) destination.I
 		Author:    user.Acct,
 		Published: time.Now().UTC(),
 		FeedTitle: "feedrepeater",
-		FeedURL:   s.cfg.BaseURL.String(),
 	}
 	f, err := s.store.FeedByUser(ctx, user.ID)
 	if err != nil {
 		return item
 	}
-	item.FeedTitle, item.FeedURL = f.Title, f.URL
+	item.FeedTitle = f.Title
 	return item
-}
-
-// formPriority reads the ntfy priority field, falling back to ntfy's own
-// default. An out-of-range value is corrected rather than rejected: it can only
-// come from a hand-made request, and there is nothing useful to say about it.
-func formPriority(r *http.Request) int {
-	p, err := strconv.Atoi(strings.TrimSpace(r.PostFormValue("priority")))
-	if err != nil || !destination.ValidNtfyPriority(p) {
-		return destination.DefaultNtfyPriority
-	}
-	return p
-}
-
-func defaultLabel(kind string, user *store.User) string {
-	if kind == destination.KindMastodon {
-		return user.Handle()
-	}
-	return kindLabel(kind)
 }
 
 func clipLabel(s string) string {

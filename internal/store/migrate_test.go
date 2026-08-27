@@ -50,7 +50,7 @@ func TestMigrationFoldsDuplicateFeeds(t *testing.T) {
 		}
 		if _, err := db.Exec(`
 			INSERT INTO destinations (id, user_id, kind, label, created_at)
-			VALUES (?, ?, 'webhook', 'hook', 0)`, i+1, i+1); err != nil {
+			VALUES (?, ?, 'mastodon', 'toots', 0)`, i+1, i+1); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := db.Exec(`
