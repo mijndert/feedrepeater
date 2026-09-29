@@ -1,0 +1,60 @@
+{{define "content"}}
+<h1>Terms of Service</h1>
+<p class="hint title-block">Last updated {{.Data.Updated}}.</p>
+
+<section>
+<h2>The service</h2>
+<p>feedrepeater fetches a feed you name and posts new entries to the Mastodon account you sign in with. It is a beta: it changes, it can be unavailable, and it can be discontinued.</p>
+</section>
+
+<section>
+<h2>Your account</h2>
+<p>You sign in with a Mastodon account, so whoever controls that account controls what is posted from here. You are responsible for keeping it secure and for everything posted from here in your name. Do not open extra accounts to get around the limits.</p>
+</section>
+
+<section>
+<h2>Acceptable use</h2>
+<p>Do not use feedrepeater to send spam or to republish content you have no right to. Do not attack, overload, or probe the service, and do not attempt to reach another account's data.</p>
+<p>Accounts doing any of that are suspended without notice.</p>
+</section>
+
+<section>
+<h2>Your content</h2>
+<p>Feed content stays yours. Running the service means storing your feed address, the entries read from it, delivery history, and the authorisation your instance granted, and sending those entries onward as you configured. None of it is sold or shared for any other purpose.</p>
+</section>
+
+<section>
+<h2>No warranty</h2>
+<p>The service is provided as is, without warranty of any kind. Posts can be late, missed, or duplicated, and a feed that keeps failing is stopped. Do not depend on it where a missed or late post would matter.</p>
+</section>
+
+<section>
+<h2>Liability</h2>
+<p>As far as the law allows, feedrepeater is not liable for missed or unwanted posts, lost data, lost revenue, or any indirect loss from using the service. It is free of charge, so no refund is possible.</p>
+</section>
+
+<section>
+<h2>Ending it</h2>
+<p>Delete your account in Settings whenever you want. That removes your feed, your posting settings, your history, and your stored credentials, and revokes the access token at your instance. Access here may be suspended or ended for abuse, for legal reasons, or if the service shuts down.</p>
+</section>
+
+<section>
+<h2>The software</h2>
+<p>feedrepeater is open source under the MIT licence. Using this service grants no rights beyond the ones that licence already gives everybody, and says nothing about the service itself, which these terms cover.</p>
+</section>
+
+<section>
+<h2>Changes</h2>
+<p>These terms can change. The date above is when they last did, and continued use means accepting the current version.</p>
+</section>
+
+{{if or .Data.Contact .Data.Jurisdiction}}
+<section>
+<h2>Contact and law</h2>
+<p>
+  {{if .Data.Contact}}Questions about these terms: {{.Data.Contact}}.{{end}}
+  {{if .Data.Jurisdiction}}Governed by the law of {{.Data.Jurisdiction}}.{{end}}
+</p>
+</section>
+{{end}}
+{{end}}

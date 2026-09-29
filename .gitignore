@@ -1,0 +1,24 @@
+# Secrets. Both files hold FR_SECRET_KEY, which is the key every encrypted
+# credential column in the database is derived from. A key committed next to the
+# ciphertext it decrypts is the same as no encryption at all.
+.env
+deploy/.env
+
+# SQLite databases, including the WAL and shared-memory sidecars. The sidecars
+# matter as much as the file: they carry writes newer than the .db itself, so
+# committing them leaks rows the main file does not even have yet.
+*.db
+*.db-wal
+*.db-shm
+
+# Restored copies pulled out of the Litestream replica for inspection. Same
+# contents as production, same reason to keep them out.
+deploy/restored.db
+
+# Build output and tool state.
+bin/
+.task/
+coverage.out
+
+# Local Claude Code state.
+.claude/settings.local.json

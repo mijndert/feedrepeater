@@ -1,0 +1,535 @@
+/* feedrepeater — "Set"
+ *
+ * A boxless layout: hairlines separate sections, type and spacing do the
+ * grouping. Colour appears only where something needs attention.
+ *
+ * Type sizes, weights and colours follow the approved design exactly. Spacing
+ * runs one step tighter than the mockup throughout, off a single scale — the
+ * mockup was set at mockup width, and at real width it read loose.
+ *
+ * There is no JavaScript in this application, so every control is a real form
+ * element styled directly: the checkboxes below are native inputs with
+ * appearance stripped, not markup standing in for them.
+ */
+
+:root {
+  color-scheme: light dark;
+
+  --bg: #fbfbfc;
+  --fg: #14161a;
+  --muted: #626a7a;
+  --line: #e6e8ee;
+  --field: #ffffff;
+  /* Two accents, because the accent does two jobs that pull opposite ways:
+     --accent is drawn *on* the page, so it has to contrast with the background,
+     and --accent-fill is a block of colour with white *on it*, so it has to
+     contrast with white. One value can serve both here, where the page is light
+     and the blue is dark. In the dark scheme it cannot, which is what the pair
+     is for. */
+  --accent: #2450dc;
+  --accent-fill: #2450dc;
+  --ok: #1f7a55;
+  --warn: #8a6620;
+  --bad: #b23124;
+
+  /* One spacing scale. Every gap and margin below is a step on it. */
+  --s1: 0.25rem;
+  --s2: 0.5rem;
+  --s3: 0.75rem;
+  --s4: 1rem;
+  --s5: 1.25rem;
+  --s6: 1.75rem;
+
+  --radius: 7px;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #101216;
+    --fg: #e9eaee;
+    --muted: #949bab;
+    --line: #23262e;
+    --field: #171a20;
+    /* Lifted off the dark background rather than glowing on it: 5.6:1 against
+       the page, where the old value sat at 8.2 and read as a light. The fill is
+       a separate, deeper blue because white sits on it — white on the link
+       colour is 2.3:1, which is a button nobody can read the label of. */
+    --accent: #6a86ee;
+    --accent-fill: #3f63d6;
+    --ok: #5fbe92;
+    --warn: #d3ac5c;
+    --bad: #ee8878;
+  }
+}
+
+*,
+*::before,
+*::after { box-sizing: border-box; }
+
+html { -webkit-text-size-adjust: 100%; }
+
+body {
+  margin: 0 auto;
+  padding: var(--s5) var(--s5) 3rem;
+  max-width: 44rem;
+  background: var(--bg);
+  color: var(--fg);
+  font: 15px/1.6 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 3px;
+}
+
+/* ── Header and footer ─────────────────────────────────────── */
+
+header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s4);
+  padding-bottom: var(--s4);
+  border-bottom: 1px solid var(--line);
+  margin-bottom: var(--s6);
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  min-width: 0;
+}
+
+/* A state label, not a decoration: hairline and muted, like everything else
+   here that is not asking to be looked at. */
+.badge {
+  flex: none;
+  font-size: .62rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: .1em;
+  color: var(--muted);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: .1rem .4rem;
+}
+
+.wordmark {
+  display: inline-flex;
+  align-items: center;
+  gap: .45rem;
+  font-size: .95rem;
+  font-weight: 600;
+  letter-spacing: -.015em;
+  color: var(--fg);
+}
+.wordmark:hover { text-decoration: none; }
+
+/* The mark sits a touch above the type's centre, which is where the eye reads
+   it as aligned with lowercase letters rather than floating under them.
+   It carries the accent, which is the only colour on the page that is not
+   attention: the wordmark beside it stays in the text colour. Drawn in
+   currentColor, so setting it here is all it takes, in either scheme. */
+.mark {
+  flex: none;
+  margin-top: -1px;
+  color: var(--accent);
+}
+
+header nav {
+  display: flex;
+  align-items: center;
+  gap: 1.2rem;
+  font-size: .85rem;
+}
+header nav a { color: var(--muted); }
+header nav a:hover { color: var(--fg); text-decoration: none; }
+header nav a.on { color: var(--fg); font-weight: 600; }
+
+footer {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+  margin-top: 2.25rem;
+  padding-top: var(--s4);
+  border-top: 1px solid var(--line);
+  color: var(--muted);
+  font-size: .8rem;
+}
+.footer-links { display: flex; gap: var(--s4); }
+footer a { color: inherit; }
+footer a:hover { color: var(--fg); text-decoration: none; }
+
+/* The one link down here that is asking to be clicked, so it is the one that
+   is underlined. Still muted: a request, not a banner. */
+.support { margin: 0; max-width: 34rem; }
+.support a { color: var(--fg); text-decoration: underline; }
+
+/* ── Sections: separated by a rule, never a box ────────────── */
+
+section { padding-bottom: var(--s6); }
+section + section {
+  border-top: 1px solid var(--line);
+  padding-top: var(--s6);
+}
+main > section:last-of-type { padding-bottom: 0; }
+
+h1 {
+  font-size: 1.45rem;
+  line-height: 1.25;
+  letter-spacing: -.02em;
+  font-weight: 600;
+  margin: 0 0 var(--s2);
+  text-wrap: balance;
+}
+
+/* Section headings are labels, not titles: they step down, not up. */
+h2 {
+  font-size: .72rem;
+  text-transform: uppercase;
+  letter-spacing: .12em;
+  font-weight: 600;
+  color: var(--muted);
+  margin: 0 0 var(--s4);
+}
+
+p { margin: 0 0 var(--s4); }
+p:last-child { margin-bottom: 0; }
+
+.hint, .meta { color: var(--muted); font-size: .83rem; }
+.meta + .meta::before { content: " · "; }
+.bad { color: var(--bad); }
+.back { font-size: .85rem; margin-bottom: var(--s4); }
+
+/* The sign-in column is narrower than the page: a single short form does not
+   want to be 44rem wide. */
+.narrow { max-width: 22rem; }
+
+/* ── Services, on the front page ───────────────────────────── */
+
+/* ── Messages ──────────────────────────────────────────────── */
+
+.error, .notice {
+  padding: .65rem .85rem;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--line);
+  border-radius: var(--radius);
+  font-size: .88rem;
+  margin-bottom: var(--s5);
+}
+.error { border-left-color: var(--bad); }
+.notice { border-left-color: var(--accent); }
+
+/* ── The feed ──────────────────────────────────────────────── */
+
+.feed-name {
+  font-size: 1.28rem;
+  font-weight: 600;
+  letter-spacing: -.018em;
+  margin: 0 0 var(--s1);
+  text-wrap: balance;
+}
+
+.feed-url {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: .8rem;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+  margin: 0;
+  min-width: 0;
+}
+.feed-url a { color: inherit; }
+
+/* State reads as a dot and a word, so a healthy page needs no parsing. */
+.state {
+  display: inline-flex;
+  align-items: center;
+  gap: .45rem;
+  font-size: .88rem;
+  margin: .8rem 0 0;
+}
+.state::before {
+  content: "";
+  width: .45rem;
+  height: .45rem;
+  border-radius: 50%;
+  background: var(--ok);
+  flex: none;
+}
+.state.is-paused { color: var(--muted); }
+.state.is-paused::before { background: var(--muted); }
+.state.is-waiting::before { background: var(--warn); }
+.state.is-failing { color: var(--bad); }
+.state.is-failing::before { background: var(--bad); }
+.state .sep { color: var(--muted); }
+.state .measure { color: var(--muted); font-variant-numeric: tabular-nums; }
+
+.feed-error {
+  margin: var(--s3) 0 0;
+  font-size: .85rem;
+  color: var(--bad);
+  overflow-wrap: anywhere;
+}
+
+/* ── Buttons: one filled per screen, everything else quiet ─── */
+
+button, .button {
+  font: inherit;
+  font-size: .875rem;
+  padding: .5rem var(--s4);
+  color: var(--fg);
+  background: var(--field);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  text-decoration: none;
+  cursor: pointer;
+  white-space: nowrap;
+}
+button:hover, .button:hover {
+  border-color: var(--muted);
+  text-decoration: none;
+}
+
+button.primary {
+  background: var(--accent-fill);
+  border-color: var(--accent-fill);
+  color: #fff;
+  font-weight: 500;
+}
+button.primary:hover { filter: brightness(1.08); border-color: var(--accent-fill); }
+
+button.quiet {
+  background: none;
+  border-color: transparent;
+  color: var(--muted);
+}
+button.quiet:hover { color: var(--fg); border-color: transparent; }
+button.danger { color: var(--bad); }
+button.danger:hover { border-color: var(--bad); }
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  margin-top: 1.15rem;
+  flex-wrap: wrap;
+}
+.row .right { margin-left: auto; }
+
+/* ── Forms ─────────────────────────────────────────────────── */
+
+.stack {
+  display: flex;
+  flex-direction: column;
+  gap: .4rem;
+  margin-bottom: var(--s5);
+}
+.stack > label { font-size: .85rem; font-weight: 500; }
+.stack > .hint { margin: -.1rem 0 var(--s1); }
+.stack > button { align-self: flex-start; margin-top: var(--s2); }
+
+input[type="text"],
+input[type="url"],
+input[type="password"],
+select,
+textarea {
+  font: inherit;
+  font-size: .95rem;
+  width: 100%;
+  padding: .55rem .75rem;
+  color: var(--fg);
+  background: var(--field);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+input::placeholder { color: var(--muted); }
+
+textarea {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: .9rem;
+  line-height: 1.5;
+  resize: vertical;
+}
+
+select {
+  appearance: none;
+  padding-right: 2rem;
+  /* A chevron drawn in the text colour, so it follows the theme. */
+  background-image: linear-gradient(45deg, transparent 50%, currentColor 50%),
+                    linear-gradient(135deg, currentColor 50%, transparent 50%);
+  background-position: calc(100% - 1.05rem) center, calc(100% - .75rem) center;
+  background-size: .3rem .3rem, .3rem .3rem;
+  background-repeat: no-repeat;
+}
+
+/* Native checkboxes, drawn. Leaving these to the browser is most of why the
+   old page looked unfinished. */
+input[type="checkbox"] {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 1.15rem;
+  height: 1.15rem;
+  margin: 0;
+  flex: none;
+  border-radius: 5px;
+  border: 1.5px solid var(--line);
+  background: var(--field);
+  display: grid;
+  place-content: center;
+  cursor: pointer;
+}
+input[type="checkbox"]::before {
+  content: "";
+  width: .6rem;
+  height: .6rem;
+  transform: scale(0);
+  background: #fff;
+  /* A tick as a clip path — no glyph, so it cannot pick up a font fallback. */
+  clip-path: polygon(14% 47%, 0 60%, 40% 100%, 100% 22%, 86% 9%, 38% 71%);
+}
+/* The fill, not the link colour: the tick above is white and has to be seen. */
+input[type="checkbox"]:checked {
+  background: var(--accent-fill);
+  border-color: var(--accent-fill);
+}
+input[type="checkbox"]:checked::before { transform: scale(1); }
+input[type="checkbox"]:hover:not(:checked):not(:disabled) { border-color: var(--muted); }
+
+.checkbox {
+  display: flex;
+  align-items: center;
+  gap: .6rem;
+  font-size: .9rem;
+  font-weight: 400;
+  width: fit-content;
+  cursor: pointer;
+}
+
+/* ── Activity ──────────────────────────────────────────────── */
+
+.events { list-style: none; margin: 0; padding: 0; }
+.events li {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: var(--s4);
+  align-items: baseline;
+  padding: .75rem 0;
+  border-bottom: 1px solid var(--line);
+}
+/* Open and close the list without a rule. A top border here read as an
+   underline on the Activity heading, and the bottom one
+   on the last row drew a line across the end of the section with nothing below
+   it to be separated from. The row separators alone are enough to group them. */
+.events li:last-child { border-bottom: none; }
+
+.event-title { font-size: .95rem; overflow-wrap: anywhere; }
+.event-title a { color: inherit; }
+.event-sub { font-size: .82rem; color: var(--muted); margin-top: .18rem; overflow-wrap: anywhere; }
+.event-when {
+  display: flex;
+  align-items: baseline;
+  gap: var(--s2);
+  font-size: .8rem;
+  color: var(--muted);
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+/* Retry sits on the line of the destination that failed. A row is one entry
+   and can carry a line per destination, so the timestamp column no longer knows
+   which of them a button beside it would retry. */
+.event-sub form { display: inline; }
+.event-sub button {
+  font-size: .78rem;
+  padding: .15rem .45rem;
+  margin-left: .35rem;
+}
+
+.pip {
+  display: inline-block;
+  width: .4rem;
+  height: .4rem;
+  border-radius: 50%;
+  margin-right: .45rem;
+  vertical-align: .08em;
+  background: var(--muted);
+}
+.pip-sent { background: var(--ok); }
+.pip-pending { background: var(--warn); }
+.pip-failed { background: var(--bad); }
+
+/* ── Facts list, used on settings ──────────────────────────── */
+
+.facts {
+  display: grid;
+  grid-template-columns: 8.5rem 1fr;
+  gap: .45rem var(--s4);
+  margin: 0 0 var(--s5);
+  font-size: .92rem;
+}
+.facts dt { color: var(--muted); }
+.facts dd { margin: 0; overflow-wrap: anywhere; }
+
+/* ── Questions and answers ─────────────────────────────────── */
+
+/* The last line of a title block on a page that is a long read, set off from
+   the text under it. */
+.title-block { margin-bottom: 2rem; }
+
+/* No rules between entries: the question is a heading its answer hangs under,
+   and the pairs group by spacing like everything else here. */
+.qa { margin: 0; }
+.qa dt {
+  font-size: .95rem;
+  font-weight: 700;
+  margin-top: 2rem;
+}
+.qa dt:first-of-type { margin-top: 0; }
+.qa dd {
+  margin: var(--s2) 0 0;
+  max-width: 36rem;
+}
+
+/* ── Disclosure ────────────────────────────────────────────── */
+
+details { margin-top: 1.15rem; font-size: .92rem; }
+summary {
+  cursor: pointer;
+  color: var(--muted);
+  font-size: .85rem;
+  width: fit-content;
+}
+summary:hover { color: var(--fg); }
+details[open] summary { margin-bottom: var(--s4); }
+
+/* ── Code and previews ─────────────────────────────────────── */
+
+code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: .875em;
+}
+.preview {
+  margin: 0 0 var(--s2);
+  padding: .75rem .85rem;
+  background: var(--field);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  font-size: .9rem;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* ── Narrow screens ────────────────────────────────────────── */
+
+@media (max-width: 30rem) {
+  body { padding: var(--s4) var(--s4) 2.5rem; }
+  .facts { grid-template-columns: 1fr; gap: 0; }
+  .facts dt { margin-top: var(--s2); }
+  .events li { grid-template-columns: 1fr; gap: .2rem; }
+}

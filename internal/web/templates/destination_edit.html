@@ -1,0 +1,42 @@
+{{define "content"}}
+{{$f := .Data}}
+{{$d := $f.Dest}}
+<p class="back"><a href="/dashboard">Back</a></p>
+<h1>Post settings</h1>
+<p class="meta">Mastodon · {{acct $f.Account}}</p>
+
+{{if $d.LastError}}<p class="error">Last attempt failed: {{$d.LastError}}</p>{{end}}
+
+<form method="post" action="/destinations/{{$d.ID}}" class="stack">
+  <input type="hidden" name="csrf" value="{{.CSRF}}">
+
+  <label for="label">Name</label>
+  <input type="text" id="label" name="label" value="{{$f.Label}}" maxlength="80">
+
+  <label for="visibility">Visibility</label>
+  <select id="visibility" name="visibility">
+    {{range $f.Visibilities}}<option value="{{.}}"{{if eq . $f.Visibility}} selected{{end}}>{{.}}</option>{{end}}
+  </select>
+
+  <label for="template">Post text</label>
+  <textarea id="template" name="template" rows="4">{{$f.Template}}</textarea>
+  <p class="hint">Placeholders: {{range $i, $v := $f.Variables}}{{if $i}}, {{end}}<code>{{"{{"}}{{$v.Name}}{{"}}"}}</code>{{end}}</p>
+
+  {{if $f.Preview}}
+  <p class="hint">Preview</p>
+  <pre class="preview">{{$f.Preview}}</pre>
+  {{end}}
+
+  <label class="checkbox"><input type="checkbox" name="paused" value="1"{{if $f.Paused}} checked{{end}}> Paused</label>
+  <p class="hint">Paused keeps reading the feed and stops posting it. Pausing the feed itself, on the dashboard, stops both.</p>
+
+  <button type="submit" class="primary">Save</button>
+</form>
+
+<div class="row">
+  <form method="post" action="/destinations/{{$d.ID}}/test">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <button type="submit">Send test post</button>
+  </form>
+</div>
+{{end}}

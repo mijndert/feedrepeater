@@ -1,0 +1,44 @@
+{{define "content"}}
+<h1 class="title-block">FAQ</h1>
+
+<dl class="qa">
+  <dt>What does feedrepeater do?</dt>
+  <dd>It watches an RSS or Atom feed and posts new entries to your Mastodon account.</dd>
+
+  <dt>What address do I add?</dt>
+  <dd>The feed's own address, or the site's. If the page you give links to a feed, that is the one saved.</dd>
+
+  <dt>Will it post entries I already have?</dt>
+  <dd>No. Everything in the feed when you add it is recorded as seen. Only entries that appear afterwards go out.</dd>
+
+  <dt>How often is my feed checked?</dt>
+  <dd>Every {{.Data.Interval}} while it is publishing. A feed quiet for more than a day is checked less often — twice that interval after a day, eight times after a week, twenty-four times after a month — and the first new entry puts it straight back to {{.Data.Interval}}.</dd>
+
+  <dt>How many feeds do I get, and where do they post?</dt>
+  <dd>One feed during the beta, and it posts to the Mastodon account you signed in with. There is nothing to connect and nothing to choose: the account is already known, so adding a feed is the whole setup.</dd>
+
+  <dt>Can I post somewhere else?</dt>
+  <dd>Not at the moment. Bluesky, Discord, Slack, ntfy, linkding and signed webhooks were all here and were removed to keep one thing working well. If you were using one, its settings and its stored credentials have been deleted.</dd>
+
+  <dt>What if a feed publishes a lot at once?</dt>
+  <dd>At most {{.Data.MaxItems}} entries are posted per check. The rest are recorded as seen, so a feed that renumbers its ids cannot flood your timeline.</dd>
+
+  <dt>Why sign in with Mastodon?</dt>
+  <dd>It is the account you post from, so it also serves as your identity here — which is why nothing has to be connected afterwards. Any instance works. Your password is never sent to feedrepeater: the instance grants permission to read your account and post statuses, and deleting your account revokes it.</dd>
+
+  <dt>Can I change the post text?</dt>
+  <dd>Yes, under Post settings, with a fixed set of placeholders: <code>{{"{{title}} {{url}} {{summary}} {{author}} {{feed_title}} {{published}}"}}</code>. Text is trimmed to your instance's post length by shortening the summary first, then the title. The link is never cut. Settings holds a default that a new account starts from; changing it later leaves what you already have alone.</dd>
+
+  <dt>Which timezone are dates in?</dt>
+  <dd>UTC, until you name one in Settings. It sets the dates shown here and the day <code>{{"{{published}}"}}</code> renders, which matters at the edges of a day: an entry published at 23:00 in Amsterdam is the next day's date in UTC.</dd>
+
+  <dt>What happens when something fails?</dt>
+  <dd>A failed post is retried with a growing delay before it is abandoned, and one that has given up has a Retry button on your dashboard. If your instance stops accepting the authorisation, signing out and back in issues a new one and repairs it. A feed that keeps failing is still tried on the same schedule, unless its server asks for room, and is paused after about two weeks of it, with the reason on your dashboard.</dd>
+
+  <dt>What is stored, and how do I remove it?</dt>
+  <dd>Your feed, the entries read from it, delivery history, and the authorisation your instance granted for posting. Credentials are encrypted. Deleting your account in Settings removes all of it and revokes that authorisation. Posts already published stay where they are.</dd>
+
+  <dt>What does it cost?</dt>
+  <dd>Nothing. There is no billing during the beta.</dd>
+</dl>
+{{end}}

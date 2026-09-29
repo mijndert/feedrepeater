@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{.Title}}</title>
+<link rel="stylesheet" href="{{asset "app.css"}}">
+<link rel="icon" href="{{asset "icon.svg"}}" type="image/svg+xml">
+<meta name="robots" content="noindex">
+</head>
+<body>
+<header>
+  <div class="brand">
+    <a class="wordmark" href="{{if .User}}/dashboard{{else}}/{{end}}">
+    <!-- One entry in, the same one out again: a dot with the signal repeated
+         either side of it. Drawn in currentColor so it follows the theme. -->
+    <svg class="mark" viewBox="0 0 16 16" width="17" height="17" aria-hidden="true" focusable="false">
+      <circle cx="8" cy="8" r="1.5" fill="currentColor"/>
+      <g fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round">
+        <path d="M10.6 4.9a4 4 0 0 1 0 6.2"/>
+        <path d="M12.2 3a6.5 6.5 0 0 1 0 10"/>
+        <path d="M5.4 4.9a4 4 0 0 0 0 6.2"/>
+        <path d="M3.8 3a6.5 6.5 0 0 0 0 10"/>
+      </g>
+    </svg>
+    feedrepeater
+  </a>
+    <span class="badge">Beta</span>
+  </div>
+  {{if .User}}
+  <nav>
+    <a href="/dashboard"{{if eq .Nav "dashboard"}} class="on" aria-current="page"{{end}}>Dashboard</a>
+    <a href="/settings"{{if eq .Nav "settings"}} class="on" aria-current="page"{{end}}>Settings</a>
+    <a href="/logout">Sign out</a>
+  </nav>
+  {{end}}
+</header>
+
+<main>
+{{if .Error}}<p class="error" role="alert">{{.Error}}</p>{{end}}
+{{if .Notice}}<p class="notice">{{.Notice}}</p>{{end}}
+{{template "content" .}}
+</main>
+
+<footer>
+  <p class="support">
+    Free to use, paid for out of pocket. If it is useful to you, you can
+    <a href="https://www.ko-fi.com/mijndert" rel="noreferrer">chip in on Ko-fi</a>.
+  </p>
+  <div class="footer-links">
+    <span>© 2026 - Mijndert Stuij</span>
+    <a href="/faq">FAQ</a>
+    <a href="/terms">Terms</a>
+  </div>
+</footer>
+</body>
+</html>

@@ -1,0 +1,60 @@
+# Caddy runs on the host and terminates TLS. feedrepeater listens on loopback
+# only, so this is the sole way in.
+
+feedrepeater.com {
+	encode zstd gzip
+
+	# The app sets its own security headers; these cover what a proxy is better
+	# placed to know or to strip.
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+		-Server
+		-X-Powered-By
+	}
+
+	# Static assets are immutable per deploy and safe to cache at the edge.
+	@static path /static/*
+	header @static Cache-Control "public, max-age=3600"
+
+	# Only Cloudflare may reach this origin. The gate is load-bearing rather than
+	# defence in depth: the header forwarded below is one any client can set, so
+	# without it anyone who finds the origin address could name their own client
+	# IP and get a private rate-limit bucket per value.
+	#
+	# Ranges from https://www.cloudflare.com/ips-v4 and ips-v6. They change
+	# rarely, but they do change. If proxying is ever switched off for this
+	# hostname (grey cloud), this block is what starts returning 403.
+	@not_cloudflare not remote_ip \
+ 173.245.48.0/20 103.21.244.0/22 103.22.200.0/22 103.31.4.0/22 \
+ 141.101.64.0/18 108.162.192.0/18 190.93.240.0/20 188.114.96.0/20 \
+ 197.234.240.0/22 198.41.128.0/17 162.158.0.0/15 104.16.0.0/13 \
+ 104.24.0.0/14 172.64.0.0/13 131.0.72.0/22 \
+ 2400:cb00::/32 2606:4700::/32 2803:f800::/32 2405:b500::/32 \
+ 2405:8100::/32 2a06:98c0::/29 2c0f:f248::/32
+	respond @not_cloudflare 403
+
+	reverse_proxy 127.0.0.1:8080 {
+		# The app reads the last X-Forwarded-For entry for rate limiting, so it
+		# must be one Caddy set rather than one the client sent.
+		#
+		# {remote_host} is Cloudflare's edge address, not the visitor's, and
+		# rate-limiting on it means ten sign-in attempts lock out everyone behind
+		# that colo. Cf-Connecting-IP is the real client, and is trustworthy only
+		# because the matcher above proves the request came from Cloudflare.
+		header_up X-Forwarded-For {http.request.header.Cf-Connecting-Ip}
+		header_up X-Real-IP {http.request.header.Cf-Connecting-Ip}
+
+		# Feed validation and OAuth exchanges reach third-party servers while the
+		# request is open.
+		transport http {
+			read_timeout 60s
+		}
+	}
+
+	log {
+		output file /var/log/caddy/feedrepeater.log {
+			roll_size 20mb
+			roll_keep 5
+		}
+	}
+}

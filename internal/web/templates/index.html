@@ -1,0 +1,15 @@
+{{define "content"}}
+<h1 class="narrow">Post your feed to Mastodon.</h1>
+<p class="narrow">Add an RSS or Atom feed. New entries are posted to the account you sign in with, automatically. Nothing to connect.</p>
+<p class="narrow">No ads, no tracking, no JavaScript.</p>
+
+<form method="post" action="/login" class="stack narrow">
+  <label for="instance">Mastodon instance</label>
+  <input type="text" id="instance" name="instance" placeholder="mastodon.social"
+         autocomplete="url" autocapitalize="off" autocorrect="off" spellcheck="false" required>
+  <p class="hint">Sign in with your Mastodon account. feedrepeater asks to read your account and post statuses, which is what it does with it.</p>
+  <button type="submit" class="primary">Continue</button>
+</form>
+
+<p class="hint">One feed per account during the beta.</p>
+{{end}}

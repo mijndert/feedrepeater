@@ -1,0 +1,41 @@
+{{define "content"}}
+{{$d := .Data}}
+<h1>Settings</h1>
+
+<dl class="facts">
+  <dt>Account</dt><dd>{{acct .User.Handle}}</dd>
+  <dt>Instance</dt><dd>{{.User.Host}}</dd>
+  <dt>Joined</dt><dd>{{localtime .User.Timezone .User.CreatedAt}}</dd>
+</dl>
+
+<h2>Preferences</h2>
+<form method="post" action="/settings" class="stack">
+  <input type="hidden" name="csrf" value="{{.CSRF}}">
+
+  <label for="timezone">Timezone</label>
+  <select id="timezone" name="timezone">
+    {{range $d.Zones}}<option value="{{.}}"{{if eq . $d.Timezone}} selected{{end}}>{{.}}</option>
+    {{end}}
+  </select>
+
+  <label for="default_template">Default post text</label>
+  <textarea id="default_template" name="default_template" rows="4">{{$d.DefaultTemplate}}</textarea>
+  <p class="hint">Placeholders: {{range $i, $v := $d.Variables}}{{if $i}}, {{end}}<code>{{"{{"}}{{$v.Name}}{{"}}"}}</code>{{end}}</p>
+
+  {{if $d.Preview}}
+  <p class="hint">Preview</p>
+  <pre class="preview">{{$d.Preview}}</pre>
+  {{end}}
+
+  <button type="submit" class="primary">Save settings</button>
+</form>
+
+<h2>Delete account</h2>
+<p>Removes your feed, your posting settings, your history, and your stored credentials. Posts already published stay where they are.</p>
+<form method="post" action="/settings/delete" class="stack">
+  <input type="hidden" name="csrf" value="{{.CSRF}}">
+  <label for="confirm">Type <code>{{.User.Acct}}</code> to confirm</label>
+  <input type="text" id="confirm" name="confirm" autocapitalize="off" autocorrect="off" spellcheck="false" required>
+  <button type="submit" class="danger">Delete account</button>
+</form>
+{{end}}

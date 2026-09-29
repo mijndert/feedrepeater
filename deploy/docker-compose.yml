@@ -1,0 +1,58 @@
+services:
+  feedrepeater:
+    # Published by .github/workflows/image.yml. Pulling a finished image is what
+    # lets this run somewhere without the source tree or a Go toolchain, which
+    # is the case on the NAS during the beta.
+    #
+    # :latest follows main. Set FEEDREPEATER_TAG to one of the sha-<commit> tags
+    # to hold a known-good build when a push breaks something — by the time you
+    # notice, :latest has already moved.
+    image: ghcr.io/mijndert/feedrepeater:${FEEDREPEATER_TAG:-latest}
+    restart: unless-stopped
+    # Caddy runs on the host and proxies to this port. Binding to loopback
+    # keeps the app off the public interface entirely.
+    ports:
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - feedrepeater-data:/data
+    environment:
+      FR_BASE_URL: ${FR_BASE_URL:?set FR_BASE_URL}
+      # Quoted because the message carries a colon, which YAML would otherwise
+      # read as the start of another mapping.
+      FR_SECRET_KEY: "${FR_SECRET_KEY:?generate with: feedrepeater genkey}"
+      FR_DB_PATH: /data/feedrepeater.db
+      FR_ADDR: 0.0.0.0:8080
+      FR_MIN_POLL_INTERVAL: ${FR_MIN_POLL_INTERVAL:-15m}
+      # Left unset this is zero, and the "full while in beta" refusal in auth.go
+      # guards on `> 0` — so the cap that exists in the code never applies and
+      # signup is open to anyone who finds the URL. Fifty is a starting number,
+      # not a considered one; set it to whatever you are willing to support.
+      FR_MAX_ACCOUNTS: ${FR_MAX_ACCOUNTS:-50}
+      LITESTREAM_REPLICA_URL: ${LITESTREAM_REPLICA_URL:-}
+      LITESTREAM_ACCESS_KEY_ID: ${LITESTREAM_ACCESS_KEY_ID:-}
+      LITESTREAM_SECRET_ACCESS_KEY: ${LITESTREAM_SECRET_ACCESS_KEY:-}
+      # The s3:// URL carries no region, and unlike the credentials there is no
+      # LITESTREAM_-prefixed spelling of this one — the binary reads AWS_REGION.
+      # Left empty, Litestream asks S3 where the bucket lives, which works but
+      # needs s3:GetBucketLocation and one extra call on every start. Setting it
+      # removes both.
+      AWS_REGION: ${AWS_REGION:-}
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    # No logging block on purpose. Naming a driver here overrides whatever the
+    # host daemon defaults to, and Synology's default is a custom `db` driver
+    # that Container Manager's log viewer is the only reader of: pinning
+    # json-file leaves that viewer permanently empty, which is a bad trade for a
+    # box whose logs are read through a browser.
+    #
+    # Rotation is a host-wide disk concern rather than a property of this one
+    # service, so it belongs in /etc/docker/daemon.json on hosts that need it:
+    #   {"log-driver": "json-file", "log-opts": {"max-size": "10m", "max-file": "3"}}
+
+volumes:
+  feedrepeater-data:

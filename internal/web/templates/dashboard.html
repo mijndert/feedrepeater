@@ -1,0 +1,128 @@
+{{define "content"}}
+{{$d := .Data}}
+
+<section>
+  <h2>Feed</h2>
+  {{with $d.Feed}}
+    <p class="feed-name">{{if .Title}}{{.Title}}{{else}}{{host .URL}}{{end}}</p>
+
+    <p class="feed-url"><a href="{{.URL}}" rel="noreferrer nofollow">{{.URL}}</a></p>
+
+    {{if .Paused}}
+      <p class="state is-paused">Paused</p>
+    {{else if .LastError}}
+      <p class="state is-failing">
+        Failing
+        <span class="sep">·</span>
+        <span class="measure">last tried {{ago .LastFetchAt}}</span>
+      </p>
+    {{else if .Primed}}
+      <p class="state">
+        Active
+        <span class="sep">·</span>
+        <span class="measure">checked {{ago .LastFetchAt}}, {{due .NextFetchAt}}</span>
+      </p>
+    {{else}}
+      <p class="state is-waiting">Waiting for the first check</p>
+    {{end}}
+
+    {{if .LastError}}<p class="feed-error">{{.LastError}}</p>{{end}}
+
+    <div class="row">
+      <form method="post" action="/feed/refresh">
+        <input type="hidden" name="csrf" value="{{$.CSRF}}">
+        <button type="submit">Check now</button>
+      </form>
+      <form method="post" action="/feed/pause">
+        <input type="hidden" name="csrf" value="{{$.CSRF}}">
+        <input type="hidden" name="paused" value="{{if .Paused}}0{{else}}1{{end}}">
+        <button type="submit">{{if .Paused}}Resume{{else}}Pause{{end}}</button>
+      </form>
+      <form method="post" action="/feed/delete">
+        <input type="hidden" name="csrf" value="{{$.CSRF}}">
+        <button type="submit" class="danger">Remove</button>
+      </form>
+    </div>
+  {{else}}
+    <form method="post" action="/feed" class="stack">
+      <input type="hidden" name="csrf" value="{{$.CSRF}}">
+      <label for="url">Feed address</label>
+      <input type="url" id="url" name="url" value="{{$d.FeedURL}}" placeholder="https://example.com/feed.xml" required>
+      <p class="hint">The feed address, or the site itself if you do not know it. Checked every {{$d.Interval}}. New entries are posted to the account you signed in with; entries already in the feed when you add it are not.</p>
+      <button type="submit" class="primary">Add feed</button>
+    </form>
+  {{end}}
+</section>
+
+<section>
+  <h2>Posting</h2>
+  {{with $d.Destination}}
+    <p class="feed-name">{{acct .Label}}</p>
+    {{if .Paused}}
+      <p class="state is-paused">Paused</p>
+    {{else if .LastError}}
+      <p class="state is-failing">
+        Failing
+        <span class="sep">·</span>
+        <span class="measure">{{.LastError}}</span>
+      </p>
+    {{else if .LastOKAt}}
+      <p class="state">
+        Active
+        <span class="sep">·</span>
+        <span class="measure">posted {{ago .LastOKAt}}, as {{$d.Visibility}}</span>
+      </p>
+    {{else}}
+      <p class="state is-waiting">
+        Waiting for the first entry
+        <span class="sep">·</span>
+        <span class="measure">posts as {{$d.Visibility}}</span>
+      </p>
+    {{end}}
+    <p class="hint">Your feed posts to the account you signed in with. Nothing to connect.</p>
+    <div class="row">
+      <a class="button" href="/destinations/{{.ID}}">Post settings</a>
+    </div>
+  {{else}}
+    <p class="hint">Posting is not set up yet. Sign out and back in, which reconnects your account.</p>
+  {{end}}
+</section>
+
+<section>
+  <h2>Activity</h2>
+  {{if $d.Pending}}<p class="hint">{{$d.Pending}} waiting to go out.</p>{{end}}
+  {{if $d.Activity}}
+    <ul class="events">
+      {{range $d.Activity}}
+        <li>
+          <div>
+            <div class="event-title">
+              <span class="pip pip-{{.Status}}"></span>
+              {{if .URL}}<a href="{{.URL}}" rel="noreferrer nofollow">{{.Title}}</a>{{else}}{{.Title}}{{end}}
+            </div>
+            {{range .Deliveries}}
+              <div class="event-sub">
+                {{if eq .Status "sent"}}
+                  Posted to {{.DestinationName}}{{if .RemoteURL}} · <a href="{{.RemoteURL}}" rel="noreferrer nofollow">View</a>{{end}}
+                {{else if eq .Status "failed"}}
+                  <span class="bad">{{.DestinationName}} refused it</span>{{if .LastError}} — {{.LastError}}{{end}}
+                  <form method="post" action="/deliveries/{{.ID}}/retry">
+                    <input type="hidden" name="csrf" value="{{$.CSRF}}">
+                    <button type="submit" class="quiet">Retry</button>
+                  </form>
+                {{else}}
+                  Waiting to send to {{.DestinationName}}
+                {{end}}
+              </div>
+            {{end}}
+          </div>
+          <div class="event-when">{{ago .UpdatedAt}}</div>
+        </li>
+      {{end}}
+    </ul>
+    {{if $d.ActivityMore}}<p class="hint">Older entries are not shown.</p>{{end}}
+  {{else}}
+    <p>Nothing posted yet.</p>
+  {{end}}
+</section>
+{{end}}
