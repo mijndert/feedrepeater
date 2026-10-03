@@ -1,0 +1,80 @@
+{{define "content"}}
+{{$d := .Data}}
+{{$f := $d.Feed}}
+<p class="back"><a href="/dashboard">Back</a></p>
+<h1>{{if $f.Title}}{{$f.Title}}{{else}}{{host $f.URL}}{{end}}</h1>
+<p class="feed-url"><a href="{{$f.URL}}" rel="noreferrer nofollow">{{$f.URL}}</a></p>
+
+{{if $f.Paused}}
+  <p class="state is-paused">Paused</p>
+{{else if $f.LastError}}
+  <p class="state is-failing">
+    Failing
+    <span class="sep">·</span>
+    <span class="measure">last tried {{ago $f.LastFetchAt}}</span>
+  </p>
+{{else if $f.Primed}}
+  <p class="state">
+    Active
+    <span class="sep">·</span>
+    <span class="measure">checked {{ago $f.LastFetchAt}}, {{due $f.NextFetchAt}}</span>
+  </p>
+{{else}}
+  <p class="state is-waiting">Waiting for the first check</p>
+{{end}}
+
+{{if $f.LastError}}<p class="feed-error">{{$f.LastError}}</p>{{end}}
+
+<div class="row">
+  <form method="post" action="/feeds/{{$f.ID}}/refresh">
+    <input type="hidden" name="csrf" value="{{$.CSRF}}">
+    <input type="hidden" name="return" value="feed">
+    <button type="submit">Check now</button>
+  </form>
+  <form method="post" action="/feeds/{{$f.ID}}/pause">
+    <input type="hidden" name="csrf" value="{{$.CSRF}}">
+    <input type="hidden" name="return" value="feed">
+    <input type="hidden" name="paused" value="{{if $f.Paused}}0{{else}}1{{end}}">
+    <button type="submit">{{if $f.Paused}}Resume{{else}}Pause{{end}}</button>
+  </form>
+  <form method="post" action="/feeds/{{$f.ID}}/delete" class="right">
+    <input type="hidden" name="csrf" value="{{$.CSRF}}">
+    <button type="submit" class="quiet danger">Remove</button>
+  </form>
+</div>
+
+<section class="feed-destinations">
+  <h2>Posts to</h2>
+  {{if $d.Destinations}}
+    <form method="post" action="/feeds/{{$f.ID}}/destinations">
+      <input type="hidden" name="csrf" value="{{$.CSRF}}">
+      <ul class="items">
+        {{range $d.Destinations}}
+        <li>
+          <input type="checkbox" id="dest-{{.ID}}" name="destination" value="{{.ID}}"{{if .Routed}} checked{{end}}>
+          <span>
+            <label class="item-name" for="dest-{{.ID}}">{{if eq .Kind "mastodon"}}{{acct .Label}}{{else}}{{.Label}}{{end}}</label>
+            <span class="item-sub">
+              {{kindLabel .Kind}}
+              {{if .Paused}}· Paused
+              {{else if .LastError}}· <span class="bad">Last attempt failed</span>
+              {{else if .LastOKAt}}· Posted {{ago .LastOKAt}}{{end}}
+            </span>
+          </span>
+          <span class="item-state{{if .Paused}}{{else if .LastError}} bad{{else}} ok{{end}}">{{if .Paused}}Paused{{else if .LastError}}Failing{{else}}Connected{{end}}</span>
+          <a class="button" href="/destinations/{{.ID}}">Settings</a>
+        </li>
+        {{end}}
+      </ul>
+      {{if not $d.RoutedCount}}
+        <p class="hint">Nothing ticked: entries are recorded, not posted.</p>
+      {{end}}
+      <div class="row">
+        <button type="submit" class="primary">Save</button>
+      </div>
+    </form>
+  {{else}}
+    <p>No destinations yet. <a href="/dashboard">Connect one</a>.</p>
+  {{end}}
+</section>
+{{end}}

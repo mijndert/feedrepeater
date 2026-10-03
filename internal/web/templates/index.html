@@ -1,15 +1,14 @@
 {{define "content"}}
-<h1 class="narrow">Post your feed to Mastodon.</h1>
-<p class="narrow">Add an RSS or Atom feed. New entries are posted to the account you sign in with, automatically. Nothing to connect.</p>
-<p class="narrow">No ads, no tracking, no JavaScript.</p>
+<h1 class="narrow">Post your feeds where you read.</h1>
+<p class="services">{{range $i, $k := .Data.Kinds}}{{if $i}} · {{end}}{{$k.Label}}{{end}}</p>
+<p class="narrow">RSS and Atom in, new entries out. No ads, no tracking, no JavaScript.</p>
 
 <form method="post" action="/login" class="stack narrow">
   <label for="instance">Mastodon instance</label>
   <input type="text" id="instance" name="instance" placeholder="mastodon.social"
          autocomplete="url" autocapitalize="off" autocorrect="off" spellcheck="false" required>
-  <p class="hint">Sign in with your Mastodon account. feedrepeater asks to read your account and post statuses, which is what it does with it.</p>
-  <button type="submit" class="primary">Continue</button>
+  <button type="submit" class="primary">Sign in</button>
 </form>
 
-<p class="hint">One feed per account during the beta.</p>
+<p class="hint">{{.Data.MaxFeeds}} feeds, {{.Data.MaxDestinations}} destinations. Free during the beta.</p>
 {{end}}

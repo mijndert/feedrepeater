@@ -31,6 +31,7 @@ var migrations = []string{
 	mustRead("migrations/006_user_preferences.sql"),
 	mustRead("migrations/007_shared_feeds.sql"),
 	mustRead("migrations/008_mastodon_only.sql"),
+	mustRead("migrations/009_many_feeds_and_destinations.sql"),
 }
 
 func mustRead(name string) string {
@@ -43,9 +44,29 @@ func mustRead(name string) string {
 
 var ErrNotFound = errors.New("store: not found")
 
-// ErrDuplicateKind reports that the account already has a destination of the
-// kind being created. An account gets one of each.
-var ErrDuplicateKind = errors.New("store: destination of that kind already exists")
+// Per-account limits. They are counts rather than schema constraints, and they
+// are enforced inside the transaction that inserts — the single writer
+// connection takes the write lock at BEGIN, so a count read there cannot be
+// stale by the time the row goes in.
+const (
+	// MaxFeedsPerAccount is how many feeds one account may follow.
+	MaxFeedsPerAccount = 5
+	// MaxDestinationsPerAccount is how many destinations one account may hold,
+	// of any mix of kinds.
+	MaxDestinationsPerAccount = 10
+)
+
+// ErrFeedLimit reports that the account already follows MaxFeedsPerAccount
+// feeds.
+var ErrFeedLimit = errors.New("store: feed limit reached")
+
+// ErrAlreadySubscribed reports that the account already follows the feed being
+// added. Adding it twice would be two rows delivering the same entries twice.
+var ErrAlreadySubscribed = errors.New("store: already subscribed to that feed")
+
+// ErrDestinationLimit reports that the account already holds
+// MaxDestinationsPerAccount destinations.
+var ErrDestinationLimit = errors.New("store: destination limit reached")
 
 type Store struct {
 	// rw is the writer: exactly one connection, so no write ever waits on

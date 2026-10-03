@@ -21,8 +21,9 @@ type Config struct {
 	DBPath string
 	// SecretKey is 32 bytes of root key material. All other keys derive from it.
 	SecretKey []byte
-	// MinPollInterval is the floor on how often any feed is fetched.
-	MinPollInterval time.Duration
+	// PollInterval is how often every feed is fetched. Flat: a feed that has
+	// not posted in a year is asked as often as one that posted an hour ago.
+	PollInterval time.Duration
 	// UserAgent is sent on every outbound request.
 	UserAgent string
 	// MaxItemsPerPoll caps how many new entries a single poll will queue, so a
@@ -56,7 +57,7 @@ func Load() (*Config, error) {
 		Addr:             envDefault("FR_ADDR", "127.0.0.1:8080"),
 		DBPath:           envDefault("FR_DB_PATH", "feedrepeater.db"),
 		UserAgent:        envDefault("FR_USER_AGENT", "feedrepeater/1.0 (+https://feedrepeater.com)"),
-		MinPollInterval:  15 * time.Minute,
+		PollInterval:     15 * time.Minute,
 		MaxItemsPerPoll:  5,
 		BlockedInstances: map[string]bool{},
 		Contact:          strings.TrimSpace(os.Getenv("FR_CONTACT")),
@@ -93,15 +94,23 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("FR_SECRET_KEY: must be 32 bytes (64 hex chars), got %d", len(c.SecretKey))
 	}
 
-	if v := os.Getenv("FR_MIN_POLL_INTERVAL"); v != "" {
+	// FR_MIN_POLL_INTERVAL is the name the variable had while the interval was
+	// a floor the schedule climbed away from. It is still read, so a deployment
+	// that set it keeps the interval it set, but the new name wins when both
+	// are present.
+	for _, name := range []string{"FR_MIN_POLL_INTERVAL", "FR_POLL_INTERVAL"} {
+		v := os.Getenv(name)
+		if v == "" {
+			continue
+		}
 		d, err := time.ParseDuration(v)
 		if err != nil {
-			return nil, fmt.Errorf("FR_MIN_POLL_INTERVAL: %w", err)
+			return nil, fmt.Errorf("%s: %w", name, err)
 		}
 		if d < time.Minute {
-			return nil, fmt.Errorf("FR_MIN_POLL_INTERVAL: must be at least 1m")
+			return nil, fmt.Errorf("%s: must be at least 1m", name)
 		}
-		c.MinPollInterval = d
+		c.PollInterval = d
 	}
 	if v := os.Getenv("FR_MAX_ITEMS_PER_POLL"); v != "" {
 		n, err := strconv.Atoi(v)

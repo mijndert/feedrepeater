@@ -14,22 +14,26 @@ const destColumns = `SELECT id, user_id, kind, label, config, credentials, templ
 // account is already subscribed to, so adding one starts working without a
 // second step.
 //
-// An account gets one destination per kind. A caller that checked first cannot
-// be relied on: between its check and this insert sits a webhook verification
-// round trip, so simultaneous requests would each find the kind free. The
-// unique index on (user_id, kind) settles it, and a violation comes back as
-// ErrDuplicateKind rather than as a database error the handler cannot read.
+// An account holds at most MaxDestinationsPerAccount, of any mix: two Mastodon
+// accounts and three Discord channels are five. A caller that checked first
+// cannot be relied on, because between its check and this insert sits a
+// verification round trip to the service, so the count is read here, inside
+// the write transaction, where nothing can get underneath it.
 func (s *Store) CreateDestination(ctx context.Context, d *Destination) error {
 	now := time.Now().UTC()
 	return s.tx(ctx, func(tx *sql.Tx) error {
-		err := tx.QueryRowContext(ctx, `
+		var held int
+		if err := tx.QueryRowContext(ctx,
+			`SELECT count(*) FROM destinations WHERE user_id = ?`, d.UserID).Scan(&held); err != nil {
+			return err
+		}
+		if held >= MaxDestinationsPerAccount {
+			return ErrDestinationLimit
+		}
+		if err := tx.QueryRowContext(ctx, `
 			INSERT INTO destinations (user_id, kind, label, config, credentials, template, created_at)
 			VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING id`,
-			d.UserID, d.Kind, d.Label, d.Config, d.Credentials, d.Template, now.Unix()).Scan(&d.ID)
-		if isUniqueViolation(err) {
-			return ErrDuplicateKind
-		}
-		if err != nil {
+			d.UserID, d.Kind, d.Label, d.Config, d.Credentials, d.Template, now.Unix()).Scan(&d.ID); err != nil {
 			return err
 		}
 		// Feeds are shared and carry no owner, so which feeds are "the account's"
@@ -88,6 +92,21 @@ func (s *Store) UpdateDestination(ctx context.Context, d *Destination) error {
 	return nil
 }
 
+// DeleteDestination removes one of the account's destinations, taking its
+// routes and queued deliveries with it by cascade. Someone else's destination
+// is ErrNotFound, the same as one that does not exist.
+func (s *Store) DeleteDestination(ctx context.Context, userID, id int64) error {
+	res, err := s.rw.ExecContext(ctx, `DELETE FROM destinations WHERE id = ? AND user_id = ?`, id, userID)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// RecordDestinationResult stores the outcome of the most recent send.
 func (s *Store) RecordDestinationResult(ctx context.Context, id int64, sendErr string) error {
 	if sendErr == "" {
 		_, err := s.rw.ExecContext(ctx,

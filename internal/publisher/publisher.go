@@ -14,6 +14,7 @@ import (
 	"feedrepeater.com/internal/destination"
 	"feedrepeater.com/internal/mastodon"
 	"feedrepeater.com/internal/render"
+	"feedrepeater.com/internal/safehttp"
 	"feedrepeater.com/internal/secret"
 	"feedrepeater.com/internal/store"
 )
@@ -24,12 +25,13 @@ const MaxAttempts = 6
 type Publisher struct {
 	store    *store.Store
 	keys     *secret.Keyring
+	http     *safehttp.Client
 	mastodon *mastodon.Client
 	log      *slog.Logger
 }
 
-func New(st *store.Store, keys *secret.Keyring, md *mastodon.Client, log *slog.Logger) *Publisher {
-	return &Publisher{store: st, keys: keys, mastodon: md, log: log}
+func New(st *store.Store, keys *secret.Keyring, hc *safehttp.Client, md *mastodon.Client, log *slog.Logger) *Publisher {
+	return &Publisher{store: st, keys: keys, http: hc, mastodon: md, log: log}
 }
 
 // Target decrypts a destination's credentials and builds its client.
@@ -38,13 +40,23 @@ func (p *Publisher) Target(d *store.Destination) (destination.Target, error) {
 	if err != nil {
 		return nil, destination.Permanentf("stored credentials could not be read")
 	}
-	// One kind, and still a switch: a row of a kind this binary no longer
-	// builds must fail as a delivery rather than panic or post somewhere it
-	// was not meant to. The migration deletes those rows, and a database
-	// restored from before it is exactly the case this answers.
+	// A row of a kind this binary does not build must fail as a delivery
+	// rather than panic or post somewhere it was not meant to.
 	switch d.Kind {
 	case destination.KindMastodon:
 		return destination.NewMastodon(p.mastodon, d.Config, creds)
+	case destination.KindBluesky:
+		return destination.NewBluesky(p.http, d.Config, creds)
+	case destination.KindDiscord:
+		return destination.NewDiscord(p.http, d.Config, creds)
+	case destination.KindSlack:
+		return destination.NewSlack(p.http, d.Config, creds)
+	case destination.KindNtfy:
+		return destination.NewNtfy(p.http, d.Config, creds)
+	case destination.KindLinkding:
+		return destination.NewLinkding(p.http, d.Config, creds)
+	case destination.KindWebhook:
+		return destination.NewWebhook(p.http, d.Config, creds)
 	default:
 		return nil, destination.Permanentf("unknown destination type %q", d.Kind)
 	}
@@ -118,6 +130,7 @@ func (p *Publisher) Deliver(ctx context.Context, dl *store.DueDelivery) {
 		Author:    dl.Item.Author,
 		Published: published,
 		FeedTitle: dl.FeedTitle,
+		FeedURL:   dl.FeedURL,
 	}, store.ParseLocation(dl.Timezone), idempotencyKey(dl))
 
 	if err != nil {

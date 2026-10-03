@@ -143,16 +143,19 @@ func (s *Server) Handler() http.Handler {
 
 	mux.HandleFunc("GET /dashboard", s.requireUser(s.handleDashboard))
 
-	mux.HandleFunc("POST /feed", s.requireUser(s.handleFeedSave))
-	mux.HandleFunc("POST /feed/pause", s.requireUser(s.handleFeedPause))
-	mux.HandleFunc("POST /feed/refresh", s.requireUser(s.handleFeedRefresh))
-	mux.HandleFunc("POST /feed/delete", s.requireUser(s.handleFeedDelete))
+	mux.HandleFunc("POST /feeds", s.requireUser(s.handleFeedSave))
+	mux.HandleFunc("GET /feeds/{id}", s.requireUser(s.handleFeed))
+	mux.HandleFunc("POST /feeds/{id}/destinations", s.requireUser(s.handleFeedRoutes))
+	mux.HandleFunc("POST /feeds/{id}/pause", s.requireUser(s.handleFeedPause))
+	mux.HandleFunc("POST /feeds/{id}/refresh", s.requireUser(s.handleFeedRefresh))
+	mux.HandleFunc("POST /feeds/{id}/delete", s.requireUser(s.handleFeedDelete))
 
-	// No new, no delete, and nothing to route: an account has exactly one
-	// destination, made with its feed. What is left is what it posts and how.
+	mux.HandleFunc("GET /destinations/new", s.requireUser(s.handleDestinationNew))
+	mux.HandleFunc("POST /destinations", s.requireUser(s.handleDestinationCreate))
 	mux.HandleFunc("GET /destinations/{id}", s.requireUser(s.handleDestinationEdit))
 	mux.HandleFunc("POST /destinations/{id}", s.requireUser(s.handleDestinationUpdate))
 	mux.HandleFunc("POST /destinations/{id}/test", s.requireUser(s.handleDestinationTest))
+	mux.HandleFunc("POST /destinations/{id}/delete", s.requireUser(s.handleDestinationDelete))
 
 	mux.HandleFunc("POST /deliveries/{id}/retry", s.requireUser(s.handleDeliveryRetry))
 

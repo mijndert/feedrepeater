@@ -225,7 +225,7 @@ func (s *Server) computeStats(ctx context.Context) ([]byte, error) {
 			Failed:  st.DeliveriesFailed,
 		},
 		Service: statsService{
-			PollInterval: s.cfg.MinPollInterval.String(),
+			PollInterval: s.cfg.PollInterval.String(),
 			// A zero cap means no cap, the same reading signupRefusal uses.
 			AcceptingSignups: s.cfg.MaxAccounts == 0 || st.Users < s.cfg.MaxAccounts,
 			StartedAt:        s.startedAt.UTC().Format(time.RFC3339),

@@ -1,7 +1,6 @@
 {{define "content"}}
 <h1>Sign out?</h1>
-<p>You'll need to sign in with {{acct .User.Handle}} again to come back.</p>
-<p class="hint">Your feed keeps being checked and posted while you're signed out.</p>
+<p class="hint">Signed in as {{acct .User.Handle}}. Feeds keep posting while you're signed out.</p>
 
 <form method="post" action="/logout" class="row">
   <input type="hidden" name="csrf" value="{{.CSRF}}">

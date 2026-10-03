@@ -11,10 +11,24 @@ import (
 )
 
 // MastodonConfig is the non-secret half of a Mastodon destination.
+//
+// RemoteID is the account id the instance reports, which with Host is the
+// identity this service matches on everywhere else. An account can hold more
+// than one Mastodon destination now, and two of them can be on the same
+// instance, so the host alone does not say which account a row posts as. Rows
+// written before the field existed were filled in by migration 009.
 type MastodonConfig struct {
 	Host       string `json:"host"`
 	Acct       string `json:"acct"`
+	RemoteID   string `json:"remote_id,omitempty"`
 	Visibility string `json:"visibility"`
+}
+
+// SameAccount reports whether the destination posts as the account identified
+// by host and remoteID. Exact on both: a row with no id matches nothing, rather
+// than matching every account on its host.
+func (c MastodonConfig) SameAccount(host, remoteID string) bool {
+	return c.Host == host && c.RemoteID != "" && c.RemoteID == remoteID
 }
 
 // MastodonCredentials is the encrypted half.

@@ -64,6 +64,28 @@ func (s *Store) SetUserPreferences(ctx context.Context, id int64, timezone, defa
 	return nil
 }
 
+// SwapUserToken replaces the sealed access token an account signed in with and
+// returns the one it replaced, read in the same transaction so it is the token
+// that was actually on record rather than whatever a cached copy of the account
+// remembered. Used when the connect flow authorises the signed-in account
+// itself: the new token then has to be the one every path treats as the
+// account's own, and the previous one is the caller's to revoke.
+func (s *Store) SwapUserToken(ctx context.Context, id int64, sealed []byte) ([]byte, error) {
+	var previous []byte
+	err := s.tx(ctx, func(tx *sql.Tx) error {
+		err := tx.QueryRowContext(ctx, `SELECT access_token FROM users WHERE id = ?`, id).Scan(&previous)
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrNotFound
+		}
+		if err != nil {
+			return err
+		}
+		_, err = tx.ExecContext(ctx, `UPDATE users SET access_token = ? WHERE id = ?`, sealed, id)
+		return err
+	})
+	return previous, err
+}
+
 // UserTimezone reads one account's timezone without pulling its access token
 // along with it. The delivery worker needs the zone for every post and nothing
 // else from the row.
@@ -184,34 +206,65 @@ func (s *Store) SaveInstance(ctx context.Context, in *Instance) error {
 
 // --- OAuth states ----------------------------------------------------------
 
+// What an OAuth flow is for. Recorded when the flow starts, so the callback
+// never has to be told by a parameter.
+const (
+	// OAuthLogin signs an account in, creating it if need be.
+	OAuthLogin = "login"
+	// OAuthConnect adds a further Mastodon account as a destination of the
+	// account that started the flow.
+	OAuthConnect = "connect"
+)
+
+// OAuthState is what is remembered about an authorisation in flight: the
+// instance it was started against, what it is for, and — for a connect — whose
+// destination the result becomes.
+type OAuthState struct {
+	Host    string
+	Purpose string
+	// UserID is the account that started a connect flow, and zero for a login.
+	UserID int64
+}
+
 // PutOAuthState records an in-flight authorisation. id is the hash of the state
 // value handed to the browser.
-func (s *Store) PutOAuthState(ctx context.Context, id, host string, verifier []byte, ttl time.Duration) error {
+func (s *Store) PutOAuthState(ctx context.Context, id string, st OAuthState, verifier []byte, ttl time.Duration) error {
 	now := time.Now().UTC()
+	var userID any
+	if st.UserID != 0 {
+		userID = st.UserID
+	}
+	if st.Purpose == "" {
+		st.Purpose = OAuthLogin
+	}
 	_, err := s.rw.ExecContext(ctx, `
-		INSERT INTO oauth_states (id, host, code_verifier, created_at, expires_at)
-		VALUES (?, ?, ?, ?, ?)`,
-		id, host, verifier, now.Unix(), now.Add(ttl).Unix())
+		INSERT INTO oauth_states (id, host, purpose, user_id, code_verifier, created_at, expires_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		id, st.Host, st.Purpose, userID, verifier, now.Unix(), now.Add(ttl).Unix())
 	return err
 }
 
-// TakeOAuthState consumes a state exactly once, returning the host and verifier
-// recorded when the flow started. A replayed callback finds nothing.
-func (s *Store) TakeOAuthState(ctx context.Context, id string) (host string, verifier []byte, err error) {
+// TakeOAuthState consumes a state exactly once, returning what was recorded
+// when the flow started. A replayed callback finds nothing.
+func (s *Store) TakeOAuthState(ctx context.Context, id string) (OAuthState, []byte, error) {
+	var st OAuthState
+	var verifier []byte
+	var userID sql.NullInt64
 	var expires int64
-	err = s.rw.QueryRowContext(ctx,
-		`DELETE FROM oauth_states WHERE id = ? RETURNING host, code_verifier, expires_at`, id,
-	).Scan(&host, &verifier, &expires)
+	err := s.rw.QueryRowContext(ctx,
+		`DELETE FROM oauth_states WHERE id = ? RETURNING host, purpose, user_id, code_verifier, expires_at`, id,
+	).Scan(&st.Host, &st.Purpose, &userID, &verifier, &expires)
 	if errors.Is(err, sql.ErrNoRows) {
-		return "", nil, ErrNotFound
+		return OAuthState{}, nil, ErrNotFound
 	}
 	if err != nil {
-		return "", nil, err
+		return OAuthState{}, nil, err
 	}
 	if time.Now().UTC().Unix() > expires {
-		return "", nil, ErrNotFound
+		return OAuthState{}, nil, ErrNotFound
 	}
-	return host, verifier, nil
+	st.UserID = userID.Int64
+	return st, verifier, nil
 }
 
 // --- Sessions --------------------------------------------------------------

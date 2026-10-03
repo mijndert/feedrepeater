@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"html/template"
 	"io"
@@ -48,7 +47,7 @@ func newHarness(t *testing.T, opts ...func(*config.Config)) *harness {
 		Addr:            "127.0.0.1:0",
 		BaseURL:         base,
 		DBPath:          filepath.Join(t.TempDir(), "test.db"),
-		MinPollInterval: 15 * time.Minute,
+		PollInterval:    15 * time.Minute,
 		MaxItemsPerPoll: 5,
 		UserAgent:       "test",
 	}
@@ -71,7 +70,7 @@ func newHarness(t *testing.T, opts ...func(*config.Config)) *harness {
 
 	srv, err := NewServer(Deps{
 		Config: cfg, Store: st, Keyring: keys, HTTP: hc, Mastodon: md,
-		Fetcher: feed.NewFetcher(hc), Publisher: publisher.New(st, keys, md, log), Logger: log,
+		Fetcher: feed.NewFetcher(hc), Publisher: publisher.New(st, keys, hc, md, log), Logger: log,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -192,7 +191,7 @@ func TestStatsPublishesCountsAndNothingIdentifying(t *testing.T) {
 	}
 	// The map is built from the registry rather than from what happens to be in
 	// the table, so consumers see a stable shape as kinds come and go.
-	if len(got.Destinations.ByKind) != 1 {
+	if len(got.Destinations.ByKind) != len(destination.Kinds) {
 		t.Errorf("by_kind = %v, want one entry per supported kind", got.Destinations.ByKind)
 	}
 	if !got.Service.AcceptingSignups {
@@ -269,9 +268,9 @@ func TestSignedOutAccessIsRefused(t *testing.T) {
 		t.Errorf("GET /dashboard signed out = %d, want 303", rec.Code)
 	}
 
-	rec = h.do(postForm("/feed", url.Values{"url": {"https://example.com/f.xml"}}))
+	rec = h.do(postForm("/feeds", url.Values{"url": {"https://example.com/f.xml"}}))
 	if rec.Code != http.StatusForbidden {
-		t.Errorf("POST /feed signed out = %d, want 403", rec.Code)
+		t.Errorf("POST /feeds signed out = %d, want 403", rec.Code)
 	}
 }
 
@@ -310,13 +309,13 @@ func TestStateChangingRequestsNeedACSRFToken(t *testing.T) {
 	h := newHarness(t)
 	_, cookie, csrf := h.signIn(t, "alice")
 
-	req := postForm("/feed", url.Values{"url": {"https://example.com/f.xml"}})
+	req := postForm("/feeds", url.Values{"url": {"https://example.com/f.xml"}})
 	req.AddCookie(cookie)
 	if rec := h.do(req); rec.Code != http.StatusForbidden {
 		t.Errorf("POST without CSRF token = %d, want 403", rec.Code)
 	}
 
-	req = postForm("/feed", url.Values{"url": {"https://example.com/f.xml"}, "csrf": {"wrong"}})
+	req = postForm("/feeds", url.Values{"url": {"https://example.com/f.xml"}, "csrf": {"wrong"}})
 	req.AddCookie(cookie)
 	if rec := h.do(req); rec.Code != http.StatusForbidden {
 		t.Errorf("POST with wrong CSRF token = %d, want 403", rec.Code)
@@ -324,7 +323,7 @@ func TestStateChangingRequestsNeedACSRFToken(t *testing.T) {
 
 	// The correct token gets past the CSRF gate; the request then fails on the
 	// unreachable feed, which is a different response.
-	req = postForm("/feed", url.Values{"url": {"https://example.com/f.xml"}, "csrf": {csrf}})
+	req = postForm("/feeds", url.Values{"url": {"https://example.com/f.xml"}, "csrf": {csrf}})
 	req.AddCookie(cookie)
 	if rec := h.do(req); rec.Code == http.StatusForbidden {
 		t.Error("valid CSRF token was rejected")
@@ -337,7 +336,7 @@ func TestCSRFTokenIsSessionBound(t *testing.T) {
 	_, aliceCookie, _ := h.signIn(t, "alice")
 	_, _, mallorysCSRF := h.signIn(t, "mallory")
 
-	req := postForm("/feed", url.Values{"url": {"https://example.com/f.xml"}, "csrf": {mallorysCSRF}})
+	req := postForm("/feeds", url.Values{"url": {"https://example.com/f.xml"}, "csrf": {mallorysCSRF}})
 	req.AddCookie(aliceCookie)
 	if rec := h.do(req); rec.Code != http.StatusForbidden {
 		t.Errorf("another session's CSRF token was accepted: %d", rec.Code)
@@ -348,14 +347,14 @@ func TestCrossSiteRequestsAreRefused(t *testing.T) {
 	h := newHarness(t)
 	_, cookie, csrf := h.signIn(t, "alice")
 
-	req := postForm("/feed", url.Values{"url": {"https://example.com/f.xml"}, "csrf": {csrf}})
+	req := postForm("/feeds", url.Values{"url": {"https://example.com/f.xml"}, "csrf": {csrf}})
 	req.Header.Set("Sec-Fetch-Site", "cross-site")
 	req.AddCookie(cookie)
 	if rec := h.do(req); rec.Code != http.StatusForbidden {
 		t.Errorf("cross-site POST = %d, want 403", rec.Code)
 	}
 
-	req = postForm("/feed", url.Values{"url": {"https://example.com/f.xml"}, "csrf": {csrf}})
+	req = postForm("/feeds", url.Values{"url": {"https://example.com/f.xml"}, "csrf": {csrf}})
 	req.Header.Del("Sec-Fetch-Site")
 	req.Header.Set("Origin", "https://evil.example")
 	req.AddCookie(cookie)
@@ -506,7 +505,7 @@ func TestAddingAFeedDoesNotPostItsBacklog(t *testing.T) {
 	}))
 	defer feedSrv.Close()
 
-	req := postForm("/feed", url.Values{"url": {feedSrv.URL}, "csrf": {csrf}})
+	req := postForm("/feeds", url.Values{"url": {feedSrv.URL}, "csrf": {csrf}})
 	req.AddCookie(cookie)
 	if rec := h.do(req); rec.Code != http.StatusSeeOther {
 		t.Fatalf("saving the feed = %d, want 303: %s", rec.Code, rec.Body.String())
@@ -518,10 +517,11 @@ func TestAddingAFeedDoesNotPostItsBacklog(t *testing.T) {
 		t.Errorf("adding a feed queued %d deliveries; the backlog would have been posted", n)
 	}
 
-	f, err := h.store.FeedByUser(ctx, user.ID)
-	if err != nil {
-		t.Fatal(err)
+	feeds, err := h.store.FeedsByUser(ctx, user.ID)
+	if err != nil || len(feeds) != 1 {
+		t.Fatalf("account has %d feeds, %v", len(feeds), err)
 	}
+	f := feeds[0]
 	if !f.Primed {
 		t.Error("feed was not primed at save time, leaving a window where the backlog could post")
 	}
@@ -668,8 +668,8 @@ func TestLoginRefusesRequestsWithNoOrigin(t *testing.T) {
 
 	// A signed-in POST still tolerates it, because the CSRF token covers it.
 	_, cookie, csrf := h.signIn(t, "alice")
-	req = httptest.NewRequest(http.MethodPost, "/feed/pause",
-		strings.NewReader(url.Values{"csrf": {csrf}, "paused": {"1"}}.Encode()))
+	req = httptest.NewRequest(http.MethodPost, "/settings",
+		strings.NewReader(url.Values{"csrf": {csrf}, "timezone": {"UTC"}}.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.AddCookie(cookie)
 	if rec := h.do(req); rec.Code == http.StatusForbidden {
@@ -817,67 +817,194 @@ func TestDashboardEmitsStyleHooks(t *testing.T) {
 	if strings.Contains(body, "<table") {
 		t.Error("activity still renders as a table")
 	}
-	// The destination is not chosen, so nothing on this page asks about it. A
-	// checkbox here would be one that ticks the only option there is.
+	// Routing is per feed and lives on the feed's own page, so the dashboard
+	// lists and links rather than asking.
 	if strings.Contains(body, `type="checkbox"`) {
-		t.Error("the dashboard still asks which destinations to publish to")
+		t.Error("the dashboard asks which destinations to publish to; that belongs on the feed page")
 	}
-	if strings.Contains(body, `action="/feed/destinations"`) {
-		t.Error("the routing form is still rendered")
+	if !strings.Contains(body, `href="/feeds/`+strconv.FormatInt(f.FeedID, 10)+`"`) {
+		t.Error("the dashboard does not link to the feed's page")
+	}
+	// Every service is offered, and the one connected is listed.
+	for _, k := range destination.Kinds {
+		if !strings.Contains(body, `href="/destinations/new?kind=`+k.Name+`"`) {
+			t.Errorf("the dashboard does not offer to connect %s", k.Label)
+		}
+	}
+	if !strings.Contains(body, `href="/destinations/`+strconv.FormatInt(d.ID, 10)+`"`) {
+		t.Error("the connected destination is not listed")
 	}
 }
 
-// There is no way to edit a feed's address: the only path is remove and add.
-// The endpoint has to enforce that itself, or a stale form would silently
-// replace the feed and discard the record of what had already been posted.
-func TestFeedCannotBeReplacedInPlace(t *testing.T) {
+// An account follows up to the limit, each address once, and a removed feed
+// frees its slot. The store holds the rule; this checks the handler says
+// something useful at each edge rather than failing silently.
+func TestFeedsCanBeAddedUpToTheLimit(t *testing.T) {
 	h := newHarness(t, allowPrivate)
 	user, cookie, csrf := h.signIn(t, "alice")
 	ctx := context.Background()
 
-	body := `<?xml version="1.0"?><rss version="2.0"><channel><title>First</title>` +
-		`<item><title>One</title><guid>g1</guid></item></channel></rss>`
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/rss+xml")
-		w.Write([]byte(body))
+		fmt.Fprintf(w, `<?xml version="1.0"?><rss version="2.0"><channel><title>Feed %s</title>`+
+			`<item><title>One</title><guid>g1</guid></item></channel></rss>`, r.URL.Path)
 	}))
 	defer srv.Close()
 
-	req := postForm("/feed", url.Values{"url": {srv.URL}, "csrf": {csrf}})
-	req.AddCookie(cookie)
-	if rec := h.do(req); rec.Code != http.StatusSeeOther {
-		t.Fatalf("adding the first feed = %d, want 303", rec.Code)
+	add := func(path string) *httptest.ResponseRecorder {
+		req := postForm("/feeds", url.Values{"url": {srv.URL + path}, "csrf": {csrf}})
+		req.AddCookie(cookie)
+		return h.do(req)
+	}
+	for i := range store.MaxFeedsPerAccount {
+		if rec := add(fmt.Sprintf("/%d.xml", i)); rec.Code != http.StatusSeeOther {
+			t.Fatalf("adding feed %d = %d, want 303: %s", i+1, rec.Code, rec.Body.String())
+		}
 	}
 
-	// A second submission must be refused rather than swapping the feed.
-	req = postForm("/feed", url.Values{"url": {srv.URL + "/other.xml"}, "csrf": {csrf}})
-	req.AddCookie(cookie)
-	rec := h.do(req)
+	// One over the limit is refused and says why.
+	rec := add("/too-many.xml")
 	if rec.Code != http.StatusBadRequest {
-		t.Errorf("replacing a feed in place = %d, want 400", rec.Code)
+		t.Errorf("feed %d = %d, want 400", store.MaxFeedsPerAccount+1, rec.Code)
 	}
-	if !strings.Contains(rec.Body.String(), "Remove it before adding") {
+	if !strings.Contains(rec.Body.String(), "Remove one") {
 		t.Error("the refusal does not say what to do instead")
 	}
 
-	f, err := h.store.FeedByUser(ctx, user.ID)
+	feeds, err := h.store.FeedsByUser(ctx, user.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if f.URL != srv.URL {
-		t.Errorf("feed was replaced anyway: %q", f.URL)
+	if len(feeds) != store.MaxFeedsPerAccount {
+		t.Fatalf("account has %d feeds, want %d", len(feeds), store.MaxFeedsPerAccount)
 	}
 
-	// Removing it frees the slot again.
-	req = postForm("/feed/delete", url.Values{"csrf": {csrf}})
+	// Removing one frees the slot again, and the same address twice is refused.
+	req := postForm("/feeds/"+strconv.FormatInt(feeds[0].ID, 10)+"/delete", url.Values{"csrf": {csrf}})
 	req.AddCookie(cookie)
 	if rec := h.do(req); rec.Code != http.StatusSeeOther {
-		t.Fatalf("removing the feed = %d", rec.Code)
+		t.Fatalf("removing a feed = %d", rec.Code)
 	}
-	req = postForm("/feed", url.Values{"url": {srv.URL}, "csrf": {csrf}})
+	if rec := add("/1.xml"); rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "already follow") {
+		t.Errorf("adding a feed already followed = %d, want 400 saying so", rec.Code)
+	}
+	if rec := add("/fresh.xml"); rec.Code != http.StatusSeeOther {
+		t.Errorf("adding a feed after removal = %d, want 303", rec.Code)
+	}
+
+	// The dashboard lists every one of them.
+	page := httptest.NewRequest(http.MethodGet, "/dashboard", nil)
+	page.AddCookie(cookie)
+	body := h.do(page).Body.String()
+	feeds, _ = h.store.FeedsByUser(ctx, user.ID)
+	for _, f := range feeds {
+		if !strings.Contains(body, `href="/feeds/`+strconv.FormatInt(f.ID, 10)+`"`) {
+			t.Errorf("dashboard does not list feed %d", f.ID)
+		}
+	}
+	if strings.Contains(body, `action="/feeds"`) {
+		t.Error("a full account is still offered the add form")
+	}
+}
+
+// Feed actions are addressed by id and scoped to the account's subscription,
+// so another account's feed id is a 404 rather than a lever.
+func TestFeedActionsAreOwnerScoped(t *testing.T) {
+	h := newHarness(t)
+	alice, _, _ := h.signIn(t, "alice")
+	_, mallorysCookie, mallorysCSRF := h.signIn(t, "mallory")
+	ctx := context.Background()
+
+	f, _, err := h.store.Subscribe(ctx, alice.ID, "https://example.com/feed.xml", "", nil, store.FetchState{NextFetchAt: time.Now().UTC()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := strconv.FormatInt(f.FeedID, 10)
+
+	for _, path := range []string{"/pause", "/refresh", "/delete", "/destinations"} {
+		req := postForm("/feeds/"+id+path, url.Values{"csrf": {mallorysCSRF}, "paused": {"1"}})
+		req.AddCookie(mallorysCookie)
+		if rec := h.do(req); rec.Code != http.StatusNotFound {
+			t.Errorf("POST /feeds/%s%s by another account = %d, want 404", id, path, rec.Code)
+		}
+	}
+	req := httptest.NewRequest(http.MethodGet, "/feeds/"+id, nil)
+	req.AddCookie(mallorysCookie)
+	if rec := h.do(req); rec.Code != http.StatusNotFound {
+		t.Errorf("GET another account's feed page = %d, want 404", rec.Code)
+	}
+
+	after, err := h.store.FeedByUser(ctx, alice.ID, f.FeedID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Paused {
+		t.Error("another account paused alice's feed")
+	}
+}
+
+// Each feed chooses its own destinations. Saving the form on one feed's page
+// changes that feed and leaves the account's other feeds as they were.
+func TestFeedRoutingIsPerFeed(t *testing.T) {
+	h := newHarness(t)
+	user, cookie, csrf := h.signIn(t, "alice")
+	ctx := context.Background()
+
+	a := &store.Destination{UserID: user.ID, Kind: "mastodon", Label: "@alice@example.social"}
+	b := &store.Destination{UserID: user.ID, Kind: "discord", Label: "Team channel"}
+	for _, d := range []*store.Destination{a, b} {
+		if err := h.store.CreateDestination(ctx, d); err != nil {
+			t.Fatal(err)
+		}
+	}
+	one, _, _ := h.store.Subscribe(ctx, user.ID, "https://example.com/one.xml", "", nil, store.FetchState{NextFetchAt: time.Now().UTC()})
+	two, _, _ := h.store.Subscribe(ctx, user.ID, "https://example.com/two.xml", "", nil, store.FetchState{NextFetchAt: time.Now().UTC()})
+
+	// Both start connected to both.
+	page := httptest.NewRequest(http.MethodGet, "/feeds/"+strconv.FormatInt(one.FeedID, 10), nil)
+	page.AddCookie(cookie)
+	rec := h.do(page)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET feed page = %d", rec.Code)
+	}
+	body := rec.Body.String()
+	for _, d := range []*store.Destination{a, b} {
+		if !strings.Contains(body, fmt.Sprintf(`name="destination" value="%d" checked`, d.ID)) {
+			t.Errorf("destination %d is not offered ticked on the feed page", d.ID)
+		}
+	}
+
+	// Narrow feed one to the Discord channel only.
+	req := postForm("/feeds/"+strconv.FormatInt(one.FeedID, 10)+"/destinations",
+		url.Values{"csrf": {csrf}, "destination": {strconv.FormatInt(b.ID, 10)}})
 	req.AddCookie(cookie)
 	if rec := h.do(req); rec.Code != http.StatusSeeOther {
-		t.Errorf("adding a feed after removal = %d, want 303", rec.Code)
+		t.Fatalf("saving routes = %d: %s", rec.Code, rec.Body.String())
+	}
+
+	routes, _ := h.store.FeedRoutes(ctx, user.ID, one.FeedID)
+	if len(routes) != 1 || routes[0] != b.ID {
+		t.Errorf("feed one routes = %v, want [%d]", routes, b.ID)
+	}
+	routes, _ = h.store.FeedRoutes(ctx, user.ID, two.FeedID)
+	if len(routes) != 2 {
+		t.Errorf("feed two routes = %v, want both; routing one feed changed another", routes)
+	}
+
+	// Another account's destination id attaches nothing.
+	mallory, _, _ := h.signIn(t, "mallory")
+	victim := &store.Destination{UserID: mallory.ID, Kind: "discord", Label: "Mallory's channel"}
+	if err := h.store.CreateDestination(ctx, victim); err != nil {
+		t.Fatal(err)
+	}
+	req = postForm("/feeds/"+strconv.FormatInt(one.FeedID, 10)+"/destinations",
+		url.Values{"csrf": {csrf}, "destination": {strconv.FormatInt(victim.ID, 10)}})
+	req.AddCookie(cookie)
+	if rec := h.do(req); rec.Code != http.StatusSeeOther {
+		t.Fatalf("saving routes = %d", rec.Code)
+	}
+	if routes, _ := h.store.FeedRoutes(ctx, user.ID, one.FeedID); len(routes) != 0 {
+		t.Errorf("attached another account's destination: %v", routes)
 	}
 }
 
@@ -1028,20 +1155,14 @@ func TestSettingsRejectsUnusableValues(t *testing.T) {
 	}
 }
 
-// The front page says what it does with the account you sign in with, because
-// that is now the whole of the answer: there is nothing to connect afterwards.
-func TestFrontPageSaysWhereEntriesGo(t *testing.T) {
+// The front page names every supported service, generated from the registry
+// so it cannot fall a service behind the code.
+func TestFrontPageNamesEverySupportedService(t *testing.T) {
 	h := newHarness(t)
 	body := h.do(httptest.NewRequest(http.MethodGet, "/", nil)).Body.String()
-
-	if !strings.Contains(body, "Mastodon") {
-		t.Error("the front page does not name Mastodon")
-	}
-	// Services that were here and are not any more must not still be advertised
-	// on the page somebody decides from.
-	for _, gone := range []string{"Bluesky", "Discord", "Slack", "ntfy", "linkding", "Webhook"} {
-		if strings.Contains(body, gone) {
-			t.Errorf("the front page still offers %s", gone)
+	for _, k := range destination.Kinds {
+		if !strings.Contains(body, k.Label) {
+			t.Errorf("the front page does not name %s", k.Label)
 		}
 	}
 }
@@ -1060,7 +1181,7 @@ func TestAddingAFeedConnectsTheSignedInAccount(t *testing.T) {
 	}))
 	defer feedSrv.Close()
 
-	req := postForm("/feed", url.Values{"url": {feedSrv.URL}, "csrf": {csrf}})
+	req := postForm("/feeds", url.Values{"url": {feedSrv.URL}, "csrf": {csrf}})
 	req.AddCookie(cookie)
 	if rec := h.do(req); rec.Code != http.StatusSeeOther {
 		t.Fatalf("saving the feed = %d, want 303: %s", rec.Code, rec.Body.String())
@@ -1082,7 +1203,7 @@ func TestAddingAFeedConnectsTheSignedInAccount(t *testing.T) {
 	if err := json.Unmarshal([]byte(d.Config), &cfg); err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Host != user.Host || cfg.Acct != user.Acct {
+	if cfg.Host != user.Host || cfg.Acct != user.Acct || cfg.RemoteID != user.RemoteID {
 		t.Errorf("destination points at %+v, want the signed-in account", cfg)
 	}
 	if cfg.Visibility != "public" {
@@ -1104,11 +1225,11 @@ func TestAddingAFeedConnectsTheSignedInAccount(t *testing.T) {
 	}
 
 	// And the feed publishes to it, with nobody having ticked anything.
-	f, err := h.store.FeedByUser(ctx, user.ID)
-	if err != nil {
-		t.Fatal(err)
+	feeds, err := h.store.FeedsByUser(ctx, user.ID)
+	if err != nil || len(feeds) != 1 {
+		t.Fatalf("account has %d feeds, %v", len(feeds), err)
 	}
-	routes, err := h.store.FeedRoutes(ctx, user.ID, f.ID)
+	routes, err := h.store.FeedRoutes(ctx, user.ID, feeds[0].ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1136,7 +1257,7 @@ func TestFeedIsRefusedWhenTheAccountCannotBeConnected(t *testing.T) {
 	}))
 	defer feedSrv.Close()
 
-	req := postForm("/feed", url.Values{"url": {feedSrv.URL}, "csrf": {csrf}})
+	req := postForm("/feeds", url.Values{"url": {feedSrv.URL}, "csrf": {csrf}})
 	req.AddCookie(cookie)
 	rec := h.do(req)
 	if rec.Code != http.StatusBadRequest {
@@ -1145,7 +1266,7 @@ func TestFeedIsRefusedWhenTheAccountCannotBeConnected(t *testing.T) {
 	if !strings.Contains(rec.Body.String(), "Sign out") {
 		t.Error("the error does not say what to do about it")
 	}
-	if _, err := h.store.FeedByUser(ctx, user.ID); !errors.Is(err, store.ErrNotFound) {
+	if feeds, _ := h.store.FeedsByUser(ctx, user.ID); len(feeds) != 0 {
 		t.Error("the feed was saved even though it had nowhere to publish")
 	}
 }

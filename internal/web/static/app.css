@@ -213,6 +213,16 @@ p:last-child { margin-bottom: 0; }
 
 /* ── Services, on the front page ───────────────────────────── */
 
+/* The supported services, named and nothing more: what each one does is on the
+   dashboard where it is about to be connected. The names are generated from the
+   destination registry, so this cannot fall behind the code the way a sentence
+   naming them did. */
+.services {
+  color: var(--muted);
+  font-size: .88rem;
+  max-width: 30rem;
+}
+
 /* ── Messages ──────────────────────────────────────────────── */
 
 .error, .notice {
@@ -226,7 +236,30 @@ p:last-child { margin-bottom: 0; }
 .error { border-left-color: var(--bad); }
 .notice { border-left-color: var(--accent); }
 
-/* ── The feed ──────────────────────────────────────────────── */
+.callout {
+  padding: .85rem var(--s4);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  margin-bottom: var(--s5);
+}
+.callout p:last-child { margin-bottom: 0; }
+
+/* ── The feeds ─────────────────────────────────────────────── */
+
+/* Several feeds stack as a list, each with the room one feed used to have to
+   itself. Rules between them, none above the first or below the last, for the
+   same reason the other lists do without them. */
+.feeds { list-style: none; margin: 0 0 var(--s5); padding: 0; }
+.feeds > li {
+  padding: var(--s4) 0;
+  border-bottom: 1px solid var(--line);
+}
+.feeds > li:first-child { padding-top: 0; }
+.feeds > li:last-child { border-bottom: none; }
+
+/* The add form under a list of feeds is a smaller ask than the one on an
+   empty dashboard, so it is set off from the list rather than leading it. */
+.stack.add-more { margin-top: var(--s2); }
 
 .feed-name {
   font-size: 1.28rem;
@@ -235,6 +268,8 @@ p:last-child { margin-bottom: 0; }
   margin: 0 0 var(--s1);
   text-wrap: balance;
 }
+.feed-name a { color: inherit; text-decoration: none; }
+.feed-name a:hover { text-decoration: underline; }
 
 .feed-url {
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
@@ -276,6 +311,16 @@ p:last-child { margin-bottom: 0; }
   color: var(--bad);
   overflow-wrap: anywhere;
 }
+
+/* Where a feed goes, as one line under its state: a count and the way to
+   change it. */
+.feed-routes {
+  margin: var(--s2) 0 0;
+  font-size: .85rem;
+  color: var(--muted);
+}
+
+.feed-destinations { margin-top: var(--s6); }
 
 /* ── Buttons: one filled per screen, everything else quiet ─── */
 
@@ -401,6 +446,13 @@ input[type="checkbox"]:checked {
 input[type="checkbox"]:checked::before { transform: scale(1); }
 input[type="checkbox"]:hover:not(:checked):not(:disabled) { border-color: var(--muted); }
 
+/* A box that is only there to keep a column aligned is inert: dimmed, and it
+   does not answer the pointer. */
+input[type="checkbox"]:disabled {
+  opacity: .45;
+  cursor: default;
+}
+
 .checkbox {
   display: flex;
   align-items: center;
@@ -410,6 +462,67 @@ input[type="checkbox"]:hover:not(:checked):not(:disabled) { border-color: var(--
   width: fit-content;
   cursor: pointer;
 }
+
+/* ── Destinations ──────────────────────────────────────────── */
+
+.items { list-style: none; margin: 0; padding: 0; }
+
+/* Four columns: the control, what it is, how it is doing, and what to press.
+   Status sits right so a column of states can be read without touching the
+   names, and the button is always last, so Connect and Settings land in the
+   same place rather than moving as rows change state. */
+.items li {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  gap: .85rem;
+  align-items: center;
+  padding: .8rem 0;
+  border-bottom: 1px solid var(--line);
+}
+/* The dashboard's lists have no checkbox to lead with, so they drop the first
+   column rather than leaving a gap where it would be. */
+.items.plain li { grid-template-columns: minmax(0, 1fr) auto auto; }
+
+/* No rule above the first row: with nothing between it and the section
+   heading, a top border read as an underline on the heading. */
+
+/* No rule below the last row either. Closing the list there puts a line
+   directly above the Save button, which reads as a divider between the button
+   and the form it belongs to rather than as the end of the list. The row
+   separators alone are enough to group them. */
+.items li:last-child { border-bottom: none; }
+
+.item-name {
+  font-size: .95rem;
+  font-weight: 500;
+  display: block;
+  overflow-wrap: anywhere;
+}
+.item-name a { color: inherit; }
+/* The service name doubles as the checkbox's label where there is one. */
+label.item-name { cursor: pointer; }
+.item-sub {
+  display: block;
+  margin-top: .1rem;
+  font-size: .83rem;
+  color: var(--muted);
+}
+.item-state {
+  font-size: .83rem;
+  color: var(--muted);
+  white-space: nowrap;
+}
+.item-state.bad { color: var(--bad); }
+.item-state.ok { color: var(--ok); }
+
+/* The list of services to connect sits under the list of what is connected,
+   so it is headed quietly and its rows are a little tighter. */
+h3 {
+  font-size: .95rem;
+  font-weight: 600;
+  margin: var(--s5) 0 var(--s1);
+}
+.items.connect li { padding: .6rem 0; }
 
 /* ── Activity ──────────────────────────────────────────────── */
 
@@ -430,6 +543,9 @@ input[type="checkbox"]:hover:not(:checked):not(:disabled) { border-color: var(--
 
 .event-title { font-size: .95rem; overflow-wrap: anywhere; }
 .event-title a { color: inherit; }
+/* Which feed an entry came from, once there is more than one to tell apart. */
+.event-feed { color: var(--muted); font-size: .82rem; margin-left: .35rem; }
+.event-feed::before { content: "· "; }
 .event-sub { font-size: .82rem; color: var(--muted); margin-top: .18rem; overflow-wrap: anywhere; }
 .event-when {
   display: flex;
@@ -513,6 +629,8 @@ code {
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: .875em;
 }
+.secret code { overflow-wrap: anywhere; }
+
 .preview {
   margin: 0 0 var(--s2);
   padding: .75rem .85rem;
@@ -531,5 +649,15 @@ code {
   body { padding: var(--s4) var(--s4) 2.5rem; }
   .facts { grid-template-columns: 1fr; gap: 0; }
   .facts dt { margin-top: var(--s2); }
+  /* Status and the button drop under the name rather than squeezing three
+     things onto one line. */
+  .items li {
+    grid-template-columns: auto minmax(0, 1fr);
+    row-gap: .3rem;
+  }
+  .items.plain li { grid-template-columns: minmax(0, 1fr); }
+  .item-state:empty { display: none; }
+  .item-state, .items .button { grid-column: 2; justify-self: start; }
+  .items.plain .item-state, .items.plain .button { grid-column: 1; }
   .events li { grid-template-columns: 1fr; gap: .2rem; }
 }

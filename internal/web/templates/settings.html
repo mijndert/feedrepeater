@@ -20,10 +20,9 @@
 
   <label for="default_template">Default post text</label>
   <textarea id="default_template" name="default_template" rows="4">{{$d.DefaultTemplate}}</textarea>
-  <p class="hint">Placeholders: {{range $i, $v := $d.Variables}}{{if $i}}, {{end}}<code>{{"{{"}}{{$v.Name}}{{"}}"}}</code>{{end}}</p>
+  <p class="hint">Starting text for new destinations. {{range $i, $v := $d.Variables}}{{if $i}} {{end}}<code>{{"{{"}}{{$v.Name}}{{"}}"}}</code>{{end}}</p>
 
   {{if $d.Preview}}
-  <p class="hint">Preview</p>
   <pre class="preview">{{$d.Preview}}</pre>
   {{end}}
 
@@ -31,7 +30,7 @@
 </form>
 
 <h2>Delete account</h2>
-<p>Removes your feed, your posting settings, your history, and your stored credentials. Posts already published stay where they are.</p>
+<p>Removes everything and revokes the Mastodon authorisations. Published posts stay.</p>
 <form method="post" action="/settings/delete" class="stack">
   <input type="hidden" name="csrf" value="{{.CSRF}}">
   <label for="confirm">Type <code>{{.User.Acct}}</code> to confirm</label>

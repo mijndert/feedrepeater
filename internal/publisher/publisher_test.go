@@ -36,7 +36,7 @@ func queued(t *testing.T) (*Publisher, *store.Store, *store.DueDelivery) {
 	}
 	hc := safehttp.New(safehttp.Options{UserAgent: "test"})
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	p := New(st, keys, mastodon.New(hc), log)
+	p := New(st, keys, hc, mastodon.New(hc), log)
 
 	user, err := st.UpsertUser(ctx, &store.User{
 		Host: "example.social", RemoteID: "alice-id", Acct: "alice", AccessToken: []byte("x"),

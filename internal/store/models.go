@@ -176,6 +176,9 @@ type FeedView struct {
 	// Subscribers is how many accounts follow this feed. One fetch serves all
 	// of them, which is the whole point of the feed being shared.
 	Subscribers int
+	// Routes is how many of this account's unpaused destinations the feed
+	// reaches. Zero means entries are recorded and posted nowhere.
+	Routes int
 }
 
 type Item struct {
@@ -230,6 +233,7 @@ type DeliveryView struct {
 	Delivery
 	ItemTitle       string
 	ItemURL         string
+	FeedTitle       string
 	DestinationKind string
 	DestinationName string
 }

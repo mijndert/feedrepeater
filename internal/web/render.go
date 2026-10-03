@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"feedrepeater.com/internal/destination"
 	"feedrepeater.com/internal/store"
 )
 
@@ -22,8 +23,13 @@ type page struct {
 	Error  string
 	// Nav names the header item to mark as current: "dashboard", "settings",
 	// or empty on pages that are not in the header.
-	Nav  string
-	Data any
+	Nav string
+	// Handoff marks a page whose form ends with the browser being sent to a
+	// Mastodon instance — signing in, or connecting a further account. Firefox
+	// and Safari apply form-action to the whole redirect chain, so such a page
+	// needs a policy that permits https: targets; every other page keeps 'self'.
+	Handoff bool
+	Data    any
 }
 
 // navSection maps a path to the header item that should be marked current.
@@ -49,7 +55,10 @@ var notices = map[string]string{
 	"feed-resumed":   "Feed resumed.",
 	"refreshing":     "Checking the feed now.",
 	"retrying":       "That post is queued to go out again.",
-	"dest-saved":     "Post settings saved.",
+	"routes-saved":   "Destinations updated.",
+	"dest-added":     "Destination added.",
+	"dest-saved":     "Destination saved.",
+	"dest-removed":   "Destination removed.",
 	"test-sent":      "Test post sent.",
 	"settings-saved": "Settings saved.",
 	"signed-out":     "Signed out.",
@@ -62,12 +71,13 @@ func (s *Server) parseTemplates() error {
 		"ago":       ago,
 		"due":       due,
 		"localtime": localtime,
+		"kindLabel": kindLabel,
 		"host":      hostOf,
 		"acct":      acct,
 	}
 
 	s.templates = map[string]*template.Template{}
-	for _, name := range []string{"index", "dashboard", "destination_edit", "settings", "faq", "terms", "logout", "error"} {
+	for _, name := range []string{"index", "dashboard", "feed", "destination_new", "destination_edit", "settings", "faq", "terms", "logout", "error"} {
 		t, err := template.New("layout.html").Funcs(funcs).
 			ParseFS(templateFS, "templates/layout.html", "templates/"+name+".html")
 		if err != nil {
@@ -111,8 +121,8 @@ func (s *Server) render(w http.ResponseWriter, r *http.Request, status int, name
 	if p.Nav == "" {
 		p.Nav = navSection(r.URL.Path)
 	}
-	// The sign-in form has to be able to hand off to a Mastodon instance.
-	if name == "index" {
+	// A form that hands off to a Mastodon instance needs room to do so.
+	if p.Handoff {
 		w.Header().Set("Content-Security-Policy", signInCSP)
 	}
 
@@ -238,6 +248,16 @@ func localtime(zone string, t any) string {
 		return localtime(zone, *x)
 	}
 	return ""
+}
+
+// kindLabel is the human name of a destination kind, for templates that have
+// only the stored string. Unknown kinds — a row from a binary that knew more
+// services — are shown as stored rather than hidden.
+func kindLabel(kind string) string {
+	if k, ok := destination.KindByName(kind); ok {
+		return k.Label
+	}
+	return kind
 }
 
 // acct renders a fully-qualified account name so a proxy in front of us leaves

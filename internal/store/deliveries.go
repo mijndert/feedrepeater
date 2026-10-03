@@ -134,6 +134,7 @@ type DueDelivery struct {
 	Item        Item
 	Destination Destination
 	FeedTitle   string
+	FeedURL     string
 	// Timezone is the account's own, which is what {{published}} renders in.
 	Timezone string
 }
@@ -144,7 +145,7 @@ func (s *Store) DueDeliveries(ctx context.Context, limit int) ([]*DueDelivery, e
 		SELECT dl.id, dl.user_id, dl.item_id, dl.destination_id, dl.attempts,
 			i.feed_id, i.guid, i.url, i.title, i.summary, i.author, i.published_at,
 			d.user_id, d.kind, d.label, d.config, d.credentials, d.template, d.paused,
-			f.title, u.timezone
+			f.title, f.url, u.timezone
 		FROM deliveries dl
 		JOIN items i ON i.id = dl.item_id
 		JOIN destinations d ON d.id = dl.destination_id
@@ -167,7 +168,7 @@ func (s *Store) DueDeliveries(ctx context.Context, limit int) ([]*DueDelivery, e
 			&d.Item.Author, &published,
 			&d.Destination.UserID, &d.Destination.Kind, &d.Destination.Label,
 			&d.Destination.Config, &d.Destination.Credentials, &d.Destination.Template, &paused,
-			&d.FeedTitle, &d.Timezone); err != nil {
+			&d.FeedTitle, &d.FeedURL, &d.Timezone); err != nil {
 			return nil, err
 		}
 		d.Item.ID, d.Destination.ID = d.ItemID, d.DestinationID
@@ -232,9 +233,10 @@ func (s *Store) RecentDeliveries(ctx context.Context, userID int64, limit int) (
 	rows, err := s.ro.QueryContext(ctx, `
 		SELECT dl.id, dl.user_id, dl.item_id, dl.destination_id, dl.status, dl.attempts,
 			dl.next_attempt_at, dl.last_error, dl.remote_url, dl.created_at, dl.updated_at,
-			i.title, i.url, d.kind, d.label
+			i.title, i.url, f.title, d.kind, d.label
 		FROM deliveries dl
 		JOIN items i ON i.id = dl.item_id
+		JOIN feeds f ON f.id = i.feed_id
 		JOIN destinations d ON d.id = dl.destination_id
 		WHERE dl.user_id = ?
 		ORDER BY dl.id DESC LIMIT ?`, userID, limit)
@@ -248,7 +250,7 @@ func (s *Store) RecentDeliveries(ctx context.Context, userID int64, limit int) (
 		var next, created, updated int64
 		if err := rows.Scan(&v.ID, &v.UserID, &v.ItemID, &v.DestinationID, &v.Status, &v.Attempts,
 			&next, &v.LastError, &v.RemoteURL, &created, &updated,
-			&v.ItemTitle, &v.ItemURL, &v.DestinationKind, &v.DestinationName); err != nil {
+			&v.ItemTitle, &v.ItemURL, &v.FeedTitle, &v.DestinationKind, &v.DestinationName); err != nil {
 			return nil, err
 		}
 		v.NextAttemptAt = time.Unix(next, 0).UTC()

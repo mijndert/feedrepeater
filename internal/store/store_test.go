@@ -122,39 +122,41 @@ func TestMigrationLeavesOnlyMastodon(t *testing.T) {
 	}
 }
 
-// One destination per kind has to hold in the database, not only in the code
-// that checks before inserting: that check and its insert are separated by a
-// round trip, so concurrent requests all pass it. Two tabs adding a feed at
-// once is the case that reaches this now. Two accounts connecting the same
-// service must still be fine.
-func TestOneDestinationPerKindIsEnforcedByTheDatabase(t *testing.T) {
+// An account holds at most MaxDestinationsPerAccount destinations, and the
+// count is read inside the insert's transaction: a handler that counted first
+// would have a verification round trip between its count and the insert, so
+// concurrent requests would all find room. Two of one kind is fine now — two
+// Mastodon accounts is the case the limit replaced the per-kind rule for — and
+// another account's rows do not count against this one.
+func TestDestinationLimitIsEnforcedByTheDatabase(t *testing.T) {
 	st := testStore(t)
 	ctx := context.Background()
 	alice := testUser(t, st, "alice")
 	bob := testUser(t, st, "bob")
 
-	first := &Destination{UserID: alice.ID, Kind: "mastodon", Label: "@alice@example.social"}
-	if err := st.CreateDestination(ctx, first); err != nil {
-		t.Fatal(err)
+	for i := range MaxDestinationsPerAccount {
+		kind := "mastodon"
+		if i%2 == 1 {
+			kind = "discord"
+		}
+		if err := st.CreateDestination(ctx, &Destination{UserID: alice.ID, Kind: kind, Label: "one more"}); err != nil {
+			t.Fatalf("destination %d: %v", i+1, err)
+		}
 	}
-
-	second := &Destination{UserID: alice.ID, Kind: "mastodon", Label: "@alice@example.social"}
-	if err := st.CreateDestination(ctx, second); !errors.Is(err, ErrDuplicateKind) {
-		t.Errorf("second Mastodon destination for one account = %v, want ErrDuplicateKind", err)
+	over := &Destination{UserID: alice.ID, Kind: "mastodon", Label: "too many"}
+	if err := st.CreateDestination(ctx, over); !errors.Is(err, ErrDestinationLimit) {
+		t.Errorf("destination %d for one account = %v, want ErrDestinationLimit", MaxDestinationsPerAccount+1, err)
 	}
-
-	// The same service for a different account is untouched by the rule.
 	if err := st.CreateDestination(ctx, &Destination{UserID: bob.ID, Kind: "mastodon", Label: "@bob@example.social"}); err != nil {
-		t.Errorf("same kind for another account: %v", err)
+		t.Errorf("another account's first destination: %v", err)
 	}
 
-	// The loser of a race leaves nothing behind.
 	list, err := st.DestinationsByUser(ctx, alice.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(list) != 1 {
-		t.Errorf("account holds %d destinations, want 1", len(list))
+	if len(list) != MaxDestinationsPerAccount {
+		t.Errorf("account holds %d destinations, want %d", len(list), MaxDestinationsPerAccount)
 	}
 }
 
@@ -188,36 +190,91 @@ func TestDestinationsAreScopedToTheirOwner(t *testing.T) {
 	}
 }
 
-func TestFeedIsOnePerUserAndScoped(t *testing.T) {
+// An account follows up to MaxFeedsPerAccount feeds, each once, and reads
+// only its own. The count is decided inside the insert's transaction for the
+// same reason the destination count is.
+func TestFeedsAreCappedAndScoped(t *testing.T) {
 	st := testStore(t)
 	ctx := context.Background()
 	alice := testUser(t, st, "alice")
 	mallory := testUser(t, st, "mallory")
+	state := FetchState{NextFetchAt: time.Now().UTC()}
 
-	if _, _, err := st.Subscribe(ctx, alice.ID, "https://example.com/one.xml", "", nil, FetchState{NextFetchAt: time.Now().UTC()}); err != nil {
-		t.Fatal(err)
+	var first *Subscription
+	for i := range MaxFeedsPerAccount {
+		sub, _, err := st.Subscribe(ctx, alice.ID, fmt.Sprintf("https://example.com/%d.xml", i), "", nil, state)
+		if err != nil {
+			t.Fatalf("feed %d: %v", i+1, err)
+		}
+		if first == nil {
+			first = sub
+		}
 	}
-	if _, _, err := st.Subscribe(ctx, alice.ID, "https://example.com/two.xml", "", nil, FetchState{NextFetchAt: time.Now().UTC()}); err != nil {
-		t.Fatal(err)
+	if _, _, err := st.Subscribe(ctx, alice.ID, "https://example.com/one-too-many.xml", "", nil, state); !errors.Is(err, ErrFeedLimit) {
+		t.Errorf("feed %d = %v, want ErrFeedLimit", MaxFeedsPerAccount+1, err)
 	}
-	f, err := st.FeedByUser(ctx, alice.ID)
+	if feedExists(t, st, "https://example.com/one-too-many.xml") {
+		t.Error("a refused feed was still created")
+	}
+
+	feeds, err := st.FeedsByUser(ctx, alice.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if f.URL != "https://example.com/two.xml" {
-		t.Errorf("feed not replaced: %q", f.URL)
+	if len(feeds) != MaxFeedsPerAccount {
+		t.Fatalf("account lists %d feeds, want %d", len(feeds), MaxFeedsPerAccount)
 	}
-	// Mallory has no subscription, so there is no feed to read — the question
-	// "is this feed yours" is now a question about the subscription, which is
-	// the only per-account row there is.
-	if _, err := st.FeedByUser(ctx, mallory.ID); !errors.Is(err, ErrNotFound) {
-		t.Errorf("cross-tenant feed read succeeded: %v", err)
+	if feeds[0].ID != first.FeedID {
+		t.Errorf("feeds are not listed oldest first: %d, want %d", feeds[0].ID, first.FeedID)
 	}
 
-	// Alice's first feed had no other subscriber, so replacing it collected the
-	// row rather than leaving it to be polled for nobody.
-	if feedExists(t, st, "https://example.com/one.xml") {
+	// Mallory has no subscription, so there is no feed to read — the question
+	// "is this feed yours" is a question about the subscription, which is the
+	// only per-account row there is.
+	if _, err := st.FeedByUser(ctx, mallory.ID, first.FeedID); !errors.Is(err, ErrNotFound) {
+		t.Errorf("cross-tenant feed read succeeded: %v", err)
+	}
+	if err := st.Unsubscribe(ctx, mallory.ID, first.FeedID); !errors.Is(err, ErrNotFound) {
+		t.Errorf("cross-tenant unsubscribe = %v, want ErrNotFound", err)
+	}
+	if err := st.SetSubscriptionPaused(ctx, mallory.ID, first.FeedID, true); !errors.Is(err, ErrNotFound) {
+		t.Errorf("cross-tenant pause = %v, want ErrNotFound", err)
+	}
+	if f, err := st.FeedByUser(ctx, alice.ID, first.FeedID); err != nil || f.Paused {
+		t.Errorf("another account's pause reached alice's feed: %v %v", f, err)
+	}
+
+	// Removing one frees a slot, and a feed with no other subscriber is
+	// collected rather than polled for nobody.
+	if err := st.Unsubscribe(ctx, alice.ID, first.FeedID); err != nil {
+		t.Fatal(err)
+	}
+	if feedExists(t, st, "https://example.com/0.xml") {
 		t.Error("orphaned feed survived")
+	}
+	if _, _, err := st.Subscribe(ctx, alice.ID, "https://example.com/replacement.xml", "", nil, state); err != nil {
+		t.Errorf("adding a feed after removing one: %v", err)
+	}
+}
+
+// Following the same address twice would be two subscriptions delivering the
+// same entries twice, so it is refused, and refused by the database rather than
+// by a check two tabs could both pass.
+func TestSubscribingTwiceToOneFeedIsRefused(t *testing.T) {
+	st := testStore(t)
+	ctx := context.Background()
+	alice := testUser(t, st, "alice")
+	state := FetchState{NextFetchAt: time.Now().UTC()}
+
+	const url = "https://example.com/feed.xml"
+	if _, _, err := st.Subscribe(ctx, alice.ID, url, "", nil, state); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := st.Subscribe(ctx, alice.ID, url, "", nil, state); !errors.Is(err, ErrAlreadySubscribed) {
+		t.Errorf("second subscription to one feed = %v, want ErrAlreadySubscribed", err)
+	}
+	if feeds, _ := st.FeedsByUser(ctx, alice.ID); len(feeds) != 1 {
+		t.Errorf("account lists %d feeds, want 1", len(feeds))
 	}
 }
 
@@ -251,13 +308,13 @@ func TestSubscribingToAKnownFeedSharesIt(t *testing.T) {
 	}
 
 	// Bob leaving must not take the feed Alice is still reading.
-	if err := st.Unsubscribe(ctx, bob.ID); err != nil {
+	if err := st.Unsubscribe(ctx, bob.ID, b.FeedID); err != nil {
 		t.Fatal(err)
 	}
 	if !feedExists(t, st, url) {
 		t.Error("feed removed while still subscribed")
 	}
-	if err := st.Unsubscribe(ctx, alice.ID); err != nil {
+	if err := st.Unsubscribe(ctx, alice.ID, a.FeedID); err != nil {
 		t.Fatal(err)
 	}
 	if feedExists(t, st, url) {
@@ -342,15 +399,19 @@ func TestOAuthStateIsSingleUse(t *testing.T) {
 	st := testStore(t)
 	ctx := context.Background()
 
-	if err := st.PutOAuthState(ctx, "hash1", "example.social", []byte("verifier"), time.Minute); err != nil {
+	if err := st.PutOAuthState(ctx, "hash1", OAuthState{Host: "example.social"}, []byte("verifier"), time.Minute); err != nil {
 		t.Fatal(err)
 	}
-	host, verifier, err := st.TakeOAuthState(ctx, "hash1")
+	got, verifier, err := st.TakeOAuthState(ctx, "hash1")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if host != "example.social" || string(verifier) != "verifier" {
-		t.Errorf("got %q %q", host, verifier)
+	if got.Host != "example.social" || string(verifier) != "verifier" {
+		t.Errorf("got %+v %q", got, verifier)
+	}
+	// A flow that says nothing about itself is a sign-in.
+	if got.Purpose != OAuthLogin || got.UserID != 0 {
+		t.Errorf("default purpose = %+v, want a login for nobody in particular", got)
 	}
 	if _, _, err := st.TakeOAuthState(ctx, "hash1"); !errors.Is(err, ErrNotFound) {
 		t.Errorf("state was replayable: %v", err)
@@ -360,11 +421,31 @@ func TestOAuthStateIsSingleUse(t *testing.T) {
 func TestExpiredOAuthStateIsRejected(t *testing.T) {
 	st := testStore(t)
 	ctx := context.Background()
-	if err := st.PutOAuthState(ctx, "hash2", "example.social", []byte("v"), -time.Minute); err != nil {
+	if err := st.PutOAuthState(ctx, "hash2", OAuthState{Host: "example.social"}, []byte("v"), -time.Minute); err != nil {
 		t.Fatal(err)
 	}
 	if _, _, err := st.TakeOAuthState(ctx, "hash2"); !errors.Is(err, ErrNotFound) {
 		t.Errorf("expired state accepted: %v", err)
+	}
+}
+
+// A connect flow remembers whose destination it is for, so the callback can
+// insist the same account finishes it rather than taking that from a parameter.
+func TestOAuthStateCarriesItsPurpose(t *testing.T) {
+	st := testStore(t)
+	ctx := context.Background()
+	alice := testUser(t, st, "alice")
+
+	in := OAuthState{Host: "other.social", Purpose: OAuthConnect, UserID: alice.ID}
+	if err := st.PutOAuthState(ctx, "hash3", in, []byte("v"), time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	got, _, err := st.TakeOAuthState(ctx, "hash3")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != in {
+		t.Errorf("got %+v, want %+v", got, in)
 	}
 }
 
@@ -551,7 +632,7 @@ func TestRecordFetchLeavesPauseAlone(t *testing.T) {
 	inflight := due[0].FetchState
 
 	// What the account does while that fetch is in the air.
-	if err := st.SetSubscriptionPaused(ctx, alice.ID, true); err != nil {
+	if err := st.SetSubscriptionPaused(ctx, alice.ID, due[0].Feed.ID, true); err != nil {
 		t.Fatal(err)
 	}
 
@@ -563,7 +644,7 @@ func TestRecordFetchLeavesPauseAlone(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	after, err := st.FeedByUser(ctx, alice.ID)
+	after, err := st.FeedByUser(ctx, alice.ID, due[0].Feed.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -605,7 +686,7 @@ func TestDisableFeedStopsItForEverySubscriber(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, u := range []*User{alice, bob} {
-		after, err := st.FeedByUser(ctx, u.ID)
+		after, err := st.FeedByUser(ctx, u.ID, f.FeedID)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -757,14 +838,14 @@ func TestSubscribingRevivesAStoppedFeed(t *testing.T) {
 
 	// Alice leaves. Bob keeps the row alive, so Alice re-adding cannot get a
 	// fresh one — this is the case that had no way back.
-	if err := st.Unsubscribe(ctx, alice.ID); err != nil {
+	if err := st.Unsubscribe(ctx, alice.ID, a.FeedID); err != nil {
 		t.Fatal(err)
 	}
 	if _, _, err := st.Subscribe(ctx, alice.ID, url, "", nil, state); err != nil {
 		t.Fatal(err)
 	}
 
-	after, err := st.FeedByUser(ctx, alice.ID)
+	after, err := st.FeedByUser(ctx, alice.ID, a.FeedID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -781,7 +862,7 @@ func TestSubscribingRevivesAStoppedFeed(t *testing.T) {
 	}
 
 	// Bob, who never left, gets the working feed back too — it is one document.
-	if b, err := st.FeedByUser(ctx, bob.ID); err != nil {
+	if b, err := st.FeedByUser(ctx, bob.ID, a.FeedID); err != nil {
 		t.Fatal(err)
 	} else if b.Disabled {
 		t.Error("bob is still on the stopped feed")
@@ -840,7 +921,7 @@ func TestRevivingAFeedKeepsTheExplanationForOtherSubscribers(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	view, err := st.FeedByUser(ctx, alice.ID)
+	view, err := st.FeedByUser(ctx, alice.ID, a.FeedID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -874,7 +955,7 @@ func TestRevivingAFeedKeepsTheExplanationForOtherSubscribers(t *testing.T) {
 	if err := st.RecordFetch(ctx, &st2); err != nil {
 		t.Fatal(err)
 	}
-	if view, err := st.FeedByUser(ctx, alice.ID); err != nil {
+	if view, err := st.FeedByUser(ctx, alice.ID, a.FeedID); err != nil {
 		t.Fatal(err)
 	} else if view.LastError != "" {
 		t.Errorf("a successful fetch left the old error in place: %q", view.LastError)

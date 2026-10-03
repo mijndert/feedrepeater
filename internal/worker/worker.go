@@ -295,9 +295,9 @@ func (w *Worker) poll(ctx context.Context, df *store.DueFeed) {
 		st.BodyHash = res.BodyHash
 	}
 
-	// New entries are the only signal that a feed is alive. A server without
-	// conditional-request support answers 200 with identical content forever;
-	// treating that as a change would defeat the whole schedule.
+	// New entries are the only signal that a feed is alive. Nothing schedules
+	// on it any more, but it is the honest answer to "when did this last post"
+	// and costs nothing to keep.
 	if ingested.New > 0 {
 		st.ChangedAt = &now
 	}
@@ -305,8 +305,7 @@ func (w *Worker) poll(ctx context.Context, df *store.DueFeed) {
 		w.Notify()
 	}
 
-	wait := pollInterval(w.cfg.MinPollInterval,
-		quietFor(now, st.ChangedAt, df.Feed.CreatedAt), df.HasRoutes, res.Hint)
+	wait := pollInterval(w.cfg.PollInterval, res.Hint)
 	st.NextFetchAt = now.Add(withJitter(wait))
 
 	// A fetch that found nothing is the overwhelming majority of fetches, and
@@ -324,7 +323,6 @@ func (w *Worker) poll(ctx context.Context, df *store.DueFeed) {
 		"entries", len(res.Entries),
 		"new", ingested.New,
 		"queued", ingested.Queued,
-		"routed", df.HasRoutes,
 		"next_check_in", wait.Round(time.Second).String())
 
 	if err := w.store.RecordFetch(ctx, &st); err != nil {
@@ -350,11 +348,8 @@ func (w *Worker) recordFailure(ctx context.Context, df *store.DueFeed, st *store
 		st.FailingSince = &now
 	}
 
-	// The interval the feed had earned is what it would have waited had this
-	// succeeded.
-	earned := pollInterval(w.cfg.MinPollInterval,
-		quietFor(now, st.ChangedAt, df.Feed.CreatedAt), df.HasRoutes, 0)
-	delay := retryDelay(earned, retryAfter)
+	// The ordinary interval is what it would have waited had this succeeded.
+	delay := retryDelay(w.cfg.PollInterval, retryAfter)
 
 	// A feed that has failed for this long in a row is gone, not having a bad
 	// afternoon. Stop asking; the dashboard shows why. Unlike a subscriber's own

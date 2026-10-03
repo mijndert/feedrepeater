@@ -6,7 +6,9 @@ import (
 	"crypto/subtle"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"net/http"
+	"strconv"
 	"time"
 
 	"feedrepeater.com/internal/mastodon"
@@ -57,11 +59,31 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
 	defer cancel()
 
-	app, err := s.oauthApp(ctx, host)
+	to, err := s.beginOAuth(ctx, w, store.OAuthState{Host: host, Purpose: store.OAuthLogin})
 	if err != nil {
-		s.log.Info("register app", "host", host, "error", err)
-		s.renderIndex(w, r, http.StatusBadGateway, "Could not reach that instance. Check the address and try again.")
+		if errors.Is(err, errInstanceUnreachable) {
+			s.log.Info("register app", "host", host, "error", err)
+			s.renderIndex(w, r, http.StatusBadGateway, "Could not reach that instance. Check the address and try again.")
+			return
+		}
+		s.log.Error("start sign-in", "host", host, "error", err)
+		s.fail(w, r, http.StatusInternalServerError, "Something went wrong.")
 		return
+	}
+	http.Redirect(w, r, to, http.StatusSeeOther)
+}
+
+// beginOAuth starts an authorisation against st.Host and returns where to send
+// the browser. What the flow is for, and for whom, is recorded with the state
+// here so the callback never has to take either from a parameter.
+//
+// A host that cannot be asked for a client registration is errInstanceUnreachable,
+// which is the one failure the person can do something about; anything else is
+// this service's own.
+func (s *Server) beginOAuth(ctx context.Context, w http.ResponseWriter, st store.OAuthState) (string, error) {
+	app, err := s.oauthApp(ctx, st.Host)
+	if err != nil {
+		return "", fmt.Errorf("%w: %v", errInstanceUnreachable, err)
 	}
 
 	// PKCE: the verifier stays here (encrypted), only its hash travels.
@@ -69,19 +91,16 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	challenge := pkceChallenge(verifier)
 	sealed, err := s.keys.EncryptString(secret.PurposePKCEVerifier, verifier)
 	if err != nil {
-		s.fail(w, r, http.StatusInternalServerError, "Something went wrong.")
-		return
+		return "", err
 	}
 
 	state := secret.Token()
-	if err := s.store.PutOAuthState(ctx, secret.Hash(state), host, sealed, oauthTTL); err != nil {
-		s.log.Error("store oauth state", "error", err)
-		s.fail(w, r, http.StatusInternalServerError, "Something went wrong.")
-		return
+	if err := s.store.PutOAuthState(ctx, secret.Hash(state), st, sealed, oauthTTL); err != nil {
+		return "", fmt.Errorf("store oauth state: %w", err)
 	}
 	s.setOAuthCookie(w, state)
 
-	http.Redirect(w, r, mastodon.AuthorizeURL(host, app.ClientID, s.redirectURI(), state, challenge), http.StatusSeeOther)
+	return mastodon.AuthorizeURL(st.Host, app.ClientID, s.redirectURI(), state, challenge), nil
 }
 
 // oauthApp returns the client credentials for an instance, registering them on
@@ -159,17 +178,37 @@ func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 25*time.Second)
 	defer cancel()
 
-	// The host comes from what we recorded at the start, never from the
-	// callback parameters, and the state is consumed so it cannot be replayed.
-	host, sealedVerifier, err := s.store.TakeOAuthState(ctx, secret.Hash(state))
+	// The host, and what the flow was for, come from what we recorded at the
+	// start, never from the callback parameters, and the state is consumed so
+	// it cannot be replayed.
+	flow, sealedVerifier, err := s.store.TakeOAuthState(ctx, secret.Hash(state))
 	if err != nil {
 		s.fail(w, r, http.StatusBadRequest, "That sign-in link has expired. Try again.")
 		return
 	}
+	host := flow.Host
 	verifier, err := s.keys.DecryptString(secret.PurposePKCEVerifier, sealedVerifier)
 	if err != nil {
 		s.fail(w, r, http.StatusBadRequest, "That sign-in could not be completed. Try again.")
 		return
+	}
+
+	// A connect flow is refused before any token is minted when it cannot be
+	// finished: by a different session than the one that started it, or
+	// against an instance the operator has since blocked. A token issued and
+	// then refused would have to be revoked, and a refusal that never asks for
+	// one has nothing to leave behind.
+	var connector *store.User
+	if flow.Purpose == store.OAuthConnect {
+		connector, _ = s.currentUser(r)
+		if connector == nil || connector.ID != flow.UserID {
+			s.fail(w, r, http.StatusForbidden, "That connection was started from a different account. Sign in with it and try again.")
+			return
+		}
+		if s.cfg.InstanceBlocked(host) {
+			s.fail(w, r, http.StatusForbidden, "Accounts on that server cannot be connected.")
+			return
+		}
 	}
 
 	app, err := s.oauthApp(ctx, host)
@@ -188,7 +227,19 @@ func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
 	account, err := s.mastodon.VerifyCredentials(ctx, host, token)
 	if err != nil {
 		s.log.Info("verify credentials", "host", host, "error", err)
+		// The token is live and unusable here; hand it back rather than leave
+		// it at the instance with nothing on record about it.
+		if err := s.mastodon.RevokeToken(ctx, host, app.ClientID, app.ClientSecret, token); err != nil {
+			s.log.Warn("could not revoke an unused token", "host", host, "error", err)
+		}
 		s.fail(w, r, http.StatusBadGateway, "That instance did not confirm the account. Try again.")
+		return
+	}
+
+	// A connect flow ends here: the account authorised becomes a destination of
+	// whoever started it, and nobody is signed in or out.
+	if flow.Purpose == store.OAuthConnect {
+		s.completeConnect(ctx, w, r, connector, flow, app, token, account)
 		return
 	}
 
@@ -230,21 +281,30 @@ func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, http.StatusInternalServerError, "Something went wrong.")
 		return
 	}
+	// Sessions elsewhere may hold a copy of this account with the token just
+	// replaced. Drop them, so nothing decides anything from the old one.
+	s.forgetUser(user.ID)
 
 	// Signing in is also what connects this account to itself: the destination
 	// is made here if it does not exist, and re-sealed against the new token if
 	// it does, so re-authorising is the repair for one whose token was revoked.
 	// Failing is not fatal to the sign-in — adding a feed tries again.
-	if _, err := s.ensureMastodonDestination(ctx, user, token); err != nil {
+	_, retired, err := s.ensureMastodonDestination(ctx, user, token)
+	if err != nil {
 		s.log.Error("connect mastodon destination", "user", user.ID, "error", err)
 	}
 
-	// Only now, with nothing still relying on it, retire the old token. The
+	// Only now, with nothing still relying on them, retire the old tokens. The
 	// instance would otherwise keep every token it has ever issued to this
 	// account, each able to post, and signing in a few times would quietly
-	// leave a pile of them behind.
-	if supersededToken != "" {
-		if err := s.mastodon.RevokeToken(ctx, host, app.ClientID, app.ClientSecret, supersededToken); err != nil {
+	// leave a pile of them behind. The destination's previous token is usually
+	// the same one and is revoked once; it differs only when this account was
+	// also connected to itself through the connect flow.
+	for _, old := range []string{supersededToken, retired} {
+		if old == "" || old == token || (old == retired && old == supersededToken) {
+			continue
+		}
+		if err := s.mastodon.RevokeToken(ctx, host, app.ClientID, app.ClientSecret, old); err != nil {
 			// Not fatal: the sign-in succeeded, and the stale token is the
 			// instance's to expire. Worth knowing about, though.
 			s.log.Warn("could not revoke the previous token", "host", host, "error", err)
@@ -259,6 +319,99 @@ func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	http.Redirect(w, r, "/dashboard", http.StatusSeeOther)
+}
+
+// completeConnect finishes a connect flow: the account just authorised at
+// flow.Host becomes a Mastodon destination of user, who started it.
+//
+// The session and instance checks ran in handleCallback before the token was
+// minted; they are repeated here only as the guard on a function that stores a
+// token under an account. On any refusal the token just issued is handed
+// straight back: nothing of it is stored, and leaving it live at the instance
+// would be leaving a key under the mat for a door that was never opened.
+//
+// Connecting the account the person signed in with is allowed, and renews it:
+// the new token becomes the sign-in token as well as the destination's, so the
+// one it replaces can be retired without anything still pointing at it. A
+// sign-in and a self-connect for one account finishing in the same instant can
+// each retire the other's token; both rows then hold a revoked one until the
+// next sign-in, which is the repair for every revoked token. Only the account
+// itself can arrange that, so it is not guarded against.
+func (s *Server) completeConnect(ctx context.Context, w http.ResponseWriter, r *http.Request, user *store.User, flow store.OAuthState, app *mastodon.App, token string, account *mastodon.Account) {
+	revoke := func() {
+		if err := s.mastodon.RevokeToken(ctx, flow.Host, app.ClientID, app.ClientSecret, token); err != nil {
+			s.log.Warn("could not revoke an unused token", "host", flow.Host, "error", err)
+		}
+	}
+
+	if user == nil || user.ID != flow.UserID || s.cfg.InstanceBlocked(flow.Host) {
+		revoke()
+		s.fail(w, r, http.StatusForbidden, "That connection could not be completed.")
+		return
+	}
+
+	// Connecting the account the person signed in with renews it. The new
+	// token becomes the sign-in token first, and the one it replaces is read
+	// back from the store in the same transaction — not from the account on
+	// the request, which may be a cached copy from before an earlier swap. It
+	// is revoked below whatever happens to the destination, so a failure
+	// further on cannot leave it live with nothing on record pointing at it.
+	self := flow.Host == user.Host && account.ID == user.RemoteID
+	var previousOwn string
+	if self {
+		sealed, err := s.keys.EncryptString(secret.PurposeUserToken, token)
+		var prev []byte
+		if err == nil {
+			prev, err = s.store.SwapUserToken(ctx, user.ID, sealed)
+		}
+		if err != nil {
+			revoke()
+			s.log.Error("replace sign-in token", "user", user.ID, "error", err)
+			s.fail(w, r, http.StatusInternalServerError, "Something went wrong.")
+			return
+		}
+		if old, err := s.keys.DecryptString(secret.PurposeUserToken, prev); err == nil && old != token {
+			previousOwn = old
+		}
+		// Every cached copy of this account now carries a token that is about
+		// to be retired.
+		s.forgetUser(user.ID)
+	}
+
+	d, retired, err := s.connectMastodonDestination(ctx, user, flow.Host, account, token)
+	if self {
+		// The destination's previous token is usually this same one, revoked
+		// once; it differs only when the row had drifted from the account.
+		if retired == previousOwn {
+			retired = ""
+		}
+		if previousOwn != "" {
+			if err := s.mastodon.RevokeToken(ctx, flow.Host, app.ClientID, app.ClientSecret, previousOwn); err != nil {
+				s.log.Warn("could not revoke the previous token", "host", flow.Host, "error", err)
+			}
+		}
+	}
+	if err != nil {
+		if !self {
+			revoke()
+		}
+		if errors.Is(err, store.ErrDestinationLimit) {
+			s.fail(w, r, http.StatusBadRequest, destinationLimitMessage)
+			return
+		}
+		s.log.Error("connect mastodon destination", "user", user.ID, "host", flow.Host, "error", err)
+		s.fail(w, r, http.StatusInternalServerError, "Something went wrong.")
+		return
+	}
+	// An account connected a second time has a new token; the one it held is
+	// retired the same way a sign-in retires its predecessor.
+	if retired != "" {
+		if err := s.mastodon.RevokeToken(ctx, flow.Host, app.ClientID, app.ClientSecret, retired); err != nil {
+			s.log.Warn("could not revoke the previous token", "host", flow.Host, "error", err)
+		}
+	}
+	s.log.Info("connected a mastodon account", "user", user.ID, "host", flow.Host, "self", self)
+	redirect(w, r, "/destinations/"+strconv.FormatInt(d.ID, 10), "dest-added")
 }
 
 // handleLogoutConfirm asks before ending the session. Signing out is a POST

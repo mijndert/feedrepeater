@@ -22,7 +22,7 @@ services:
       FR_SECRET_KEY: "${FR_SECRET_KEY:?generate with: feedrepeater genkey}"
       FR_DB_PATH: /data/feedrepeater.db
       FR_ADDR: 0.0.0.0:8080
-      FR_MIN_POLL_INTERVAL: ${FR_MIN_POLL_INTERVAL:-15m}
+      FR_POLL_INTERVAL: ${FR_POLL_INTERVAL:-15m}
       # Left unset this is zero, and the "full while in beta" refusal in auth.go
       # guards on `> 0` — so the cap that exists in the code never applies and
       # signup is open to anyone who finds the URL. Fifty is a starting number,
