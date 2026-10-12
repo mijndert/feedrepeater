@@ -4,7 +4,7 @@ go 1.26.6
 
 require (
 	github.com/mmcdole/gofeed v1.5.0
-	golang.org/x/net v0.59.0
+	golang.org/x/net v0.60.0
 	modernc.org/sqlite v1.59.0
 )
 
