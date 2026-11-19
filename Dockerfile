@@ -24,7 +24,7 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 
 # Taking the binary from the official image, pinned by digest, avoids a
 # build-time download that nothing would verify.
-FROM litestream/litestream:0.5.17@sha256:4b02b9859a6b6b4087d8b8944e15f7e984bd7957cba322bbeee38b0e27b9656a AS litestream
+FROM litestream/litestream:0.5.18@sha256:513bff62a88fc0c86c73d27333c41c54c89fe890a7c32a551600adff9309b11b AS litestream
 
 FROM alpine:3.24
 RUN apk add --no-cache ca-certificates tzdata \
